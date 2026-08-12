@@ -20,8 +20,10 @@ import importlib.util
 import io
 import json
 import os
+import queue
 import sys
 import threading
+import traceback
 import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -214,6 +216,37 @@ def a_malformed_stream_is_skipped_and_an_unreadable_one_falls_over():
     check_eq(ask(chat), "hi", "comments and blank lines are ignored")
 
 
+def an_invalid_event_shape_falls_over_like_any_other_unreadable_one():
+    # Valid JSON, invalid SSE. Each of these used to escape the failover as an
+    # AttributeError or a TypeError rather than being counted as an unreadable
+    # event: the helper survived at the supervisory boundary, the next provider
+    # was never tried, and the answer was lost.
+    shapes = [
+        b'data: {"choices":[{"delta":null}]}\n',          # AttributeError
+        b'data: {"choices":[null]}\n',
+        b'data: {"choices":{"delta":{}}}\n',              # choices not a list
+        b'data: {"choices":[{"delta":[1,2]}]}\n',         # delta not an object
+        b'data: ["not", "an", "object"]\n',               # root not an object
+        b'data: "a string"\n',
+        b'data: 42\n',
+        b'data: {"choices":[{"delta":{"content":7}}]}\n',  # content not text
+    ]
+    for shape in shapes:
+        chat = chat_with(replies_with([shape, b"data: [DONE]\n"]), answers("fallback"))
+        check_eq(ask(chat), "fallback", "failover past %r" % shape.strip())
+        check(chat.providers[0].blocked_until > 0, "and the odd one is cooled down")
+
+    # And one bad shape among good events still delivers the answer.
+    chat = chat_with(replies_with([shapes[0]] + sse("real ", "answer")))
+    check_eq(ask(chat), "real answer", "one invalid event does not lose the answer")
+
+    # A delta with no content at all is normal, not malformed - it is how a
+    # stream announces a role or a finish reason - so it must not fail over on
+    # its own account when content follows.
+    ok = [b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n'] + sse("hi")
+    check_eq(ask(chat_with(replies_with(ok))), "hi", "a metadata delta is not an error")
+
+
 def cancellation_is_not_the_providers_fault():
     # Cancelled before the first token looks exactly like an empty answer from
     # here. It is not: she was told to be quiet. Blaming the endpoint would cool
@@ -323,6 +356,47 @@ def the_prompt_command_is_split_by_shlex_not_by_spaces():
         check("prompt_command" in str(e), "and the message names the setting: %s" % e)
 
 
+def a_cancel_lands_while_the_run_loop_is_busy_answering():
+    """`asuna ext cancel` has to work at the one moment it is wanted.
+
+    The run loop dispatches a `chat` event by calling converse() synchronously,
+    and converse() then blocks in the prompt and in Chat.ask(). While it is
+    there the loop is not reading its queue, so a `cancel` that only got acted
+    on by the loop would sit in that queue until the conversation it was meant
+    to interrupt had already ended. The flag is therefore set in the subscriber
+    thread, the moment the event arrives.
+
+    This drives the real subscriber, and deliberately never drains the queue -
+    which is exactly the state converse() leaves the loop in.
+    """
+    helper = ext.Helper.__new__(ext.Helper)
+    helper.events = queue.Queue()
+    helper.cancelled = threading.Event()
+    helper.running = True
+    busy = threading.Event()
+
+    class Feed:
+        path = "(test)"
+
+        def events(self):
+            yield {"event": "chat", "text": "hi"}
+            # The loop is now "inside converse()": nothing will read the queue
+            # again until this generator is long finished.
+            busy.set()
+            yield {"event": "cancel"}
+
+    helper.control = Feed()
+    worker = threading.Thread(target=helper.subscriber, daemon=True)
+    worker.start()
+    worker.join(5.0)
+
+    check(busy.is_set(), "the feed delivered both events")
+    check(helper.cancelled.is_set(),
+          "the cancel took effect without the run loop ever dequeuing it")
+    # Still queued, so a loop that is idle handles it the same way it always did.
+    check(helper.events.qsize() >= 2, "and the event is still there for the loop")
+
+
 def the_helper_survives_work_that_throws():
     # The supervisory boundary. Below it are an HTTP client, a JSON decoder, a
     # subprocess and a socket; an exception nobody predicted used to unwind
@@ -346,6 +420,7 @@ TESTS = [
     a_connection_failure_falls_over,
     an_http_error_falls_over_and_keeps_the_status,
     a_malformed_stream_is_skipped_and_an_unreadable_one_falls_over,
+    an_invalid_event_shape_falls_over_like_any_other_unreadable_one,
     cancellation_is_not_the_providers_fault,
     a_provider_that_has_started_answering_is_not_abandoned,
     an_answer_is_remembered_and_the_history_is_capped,
@@ -353,16 +428,27 @@ TESTS = [
     a_provider_with_no_working_neighbour_still_reports_every_reason,
     all_providers_cooling_down_are_tried_anyway,
     the_prompt_command_is_split_by_shlex_not_by_spaces,
+    a_cancel_lands_while_the_run_loop_is_busy_answering,
     the_helper_survives_work_that_throws,
 ]
 
 
 def main():
-    global current
+    global current, failures
     for test in TESTS:
         current = test.__name__
         before = failures
-        test()
+        try:
+            test()
+        except Exception:   # noqa: BLE001 - see below
+            # A test that throws is a failing test, not a reason to stop
+            # running the others. It matters here in particular: the shapes
+            # this suite feeds the helper are exactly the ones that used to
+            # escape as an AttributeError, so the natural way for that
+            # regression to come back is an exception rather than a wrong
+            # value - and one traceback should not hide the nine tests after it.
+            print("  FAIL %s raised:\n%s" % (current, traceback.format_exc().rstrip()))
+            failures += 1
         print("%-58s %s" % (test.__name__, "ok" if failures == before else "FAILED"))
     if failures:
         print("\n%d check(s) failed" % failures)

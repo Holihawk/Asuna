@@ -3,9 +3,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -212,26 +214,119 @@ bool writePidFile(const std::string& path, pid_t pid) {
     return true;
 }
 
-Owner readPidFile(const std::string& path, pid_t* pid) {
-    if (pid) *pid = 0;
+Identity readPidFile(const std::string& path) {
+    Identity id;
     std::ifstream f(path);
-    pid_t recorded = 0;
-    if (!(f >> recorded) || recorded <= 0) return Owner::kGone;
-    if (pid) *pid = recorded;
-
-    unsigned long long began = 0;
-    const bool haveStart = static_cast<bool>(f >> began);
-
-    const unsigned long long now = startTime(recorded);
-    if (now == 0) return Owner::kGone;   // no such process, whatever the file says
-    if (!haveStart || began == 0) {
-        // Written by a build from before this file had a second field, or by
-        // one that could not read /proc at the time. The old check is all there
-        // is, and it is what every previous version did - so this stays usable
-        // across an upgrade rather than orphaning a helper that is running fine.
-        return Owner::kUnverified;
+    if (!(f >> id.pid) || id.pid <= 0) {
+        id.pid = 0;
+        return id;   // kGone
     }
-    return began == now ? Owner::kAlive : Owner::kRecycled;
+
+    unsigned long long recorded = 0;
+    const bool haveStart = static_cast<bool>(f >> recorded);
+
+    const unsigned long long now = startTime(id.pid);
+    if (now == 0) return id;   // kGone: no such process, whatever the file says
+    if (!haveStart || recorded == 0) {
+        // Written by a build from before this file had a second field, or by
+        // one that could not read /proc at the time. Enough to say something is
+        // there - which keeps `status` honest across an upgrade rather than
+        // declaring a perfectly healthy helper absent - and deliberately not
+        // enough to signal on. See Signal::open.
+        id.state = Owner::kUnverified;
+        return id;
+    }
+    id.began = recorded;
+    id.state = recorded == now ? Owner::kAlive : Owner::kRecycled;
+    return id;
+}
+
+Signal::~Signal() { shut(); }
+
+void Signal::shut() {
+    if (mFd >= 0) ::close(mFd);
+    mFd = -1;
+    mPid = 0;
+    mBegan = 0;
+}
+
+namespace {
+
+// syscall() rather than the glibc wrappers: pidfd_open arrived in glibc 2.36
+// and pidfd_send_signal has never had one, so going through the numbers is both
+// the older-toolchain path and the only path for one of the two. A kernel
+// without them answers ENOSYS, which is what the -1 fallback below is for.
+int openPidfd(pid_t pid) {
+#ifdef SYS_pidfd_open
+    return static_cast<int>(syscall(SYS_pidfd_open, pid, 0u));
+#else
+    (void)pid;
+    return -1;
+#endif
+}
+
+bool sendThroughPidfd(int fd, int sig) {
+#ifdef SYS_pidfd_send_signal
+    return syscall(SYS_pidfd_send_signal, fd, sig, nullptr, 0u) == 0;
+#else
+    (void)fd;
+    (void)sig;
+    return false;
+#endif
+}
+
+}  // namespace
+
+bool Signal::open(const Identity& id) {
+    shut();
+    if (!id.proven() || id.began == 0) return false;
+
+    // The handle first, the confirmation second. The other order - confirm,
+    // then open - leaves exactly the gap this class is for: the process can end
+    // and its number be reissued in between, and the handle would then name the
+    // newcomer.
+    const int fd = openPidfd(id.pid);
+    if (startTime(id.pid) != id.began) {
+        if (fd >= 0) ::close(fd);
+        return false;
+    }
+    mPid = id.pid;
+    mBegan = id.began;
+    mFd = fd;   // -1 where the kernel has no pidfds; send() falls back
+    return true;
+}
+
+bool Signal::openUnproven(pid_t pid) {
+    shut();
+    if (pid <= 0) return false;
+    const int fd = openPidfd(pid);
+    const unsigned long long now = startTime(pid);
+    if (now == 0) {
+        if (fd >= 0) ::close(fd);
+        return false;
+    }
+    // Whatever it is, it is pinned from here on: --force means "signal that
+    // process", not "signal whatever holds that number by the time we get
+    // round to it".
+    mPid = pid;
+    mBegan = now;
+    mFd = fd;
+    return true;
+}
+
+bool Signal::alive() const {
+    if (mPid <= 0) return false;
+    if (mFd >= 0) return sendThroughPidfd(mFd, 0);
+    return startTime(mPid) == mBegan;
+}
+
+bool Signal::send(int sig) const {
+    if (mPid <= 0) return false;
+    if (mFd >= 0) return sendThroughPidfd(mFd, sig);
+    // No pidfd. Re-reading the identity immediately before the signal narrows
+    // the window rather than closing it, which is the best a pid can do.
+    if (startTime(mPid) != mBegan) return false;
+    return kill(mPid, sig) == 0;
 }
 
 }  // namespace daemon

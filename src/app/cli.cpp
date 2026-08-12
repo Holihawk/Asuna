@@ -94,6 +94,8 @@ void usage() {
         "extensions (off by default; see `asuna config init`, section [ext])\n"
         "  chat [text]          talk to her - opens a prompt if given no text\n"
         "  ext <start|stop|restart|status|config|cancel>\n"
+        "                       stop/restart take --force, which signals a pid\n"
+        "                       file too old to prove what it names\n"
         "  ext test             can each configured provider be reached\n"
         "  subscribe            print her events as they happen, until ^C\n"
         "\n"
@@ -614,6 +616,31 @@ int cmdConfig(int argc, char** argv, int from) {
     if (verb == "check") {
         Config cfg;
         cfg.load(path);
+
+        // Everything this verb has to say that is not fatal, worked out once
+        // and then printed in whichever form was asked for. Two branches each
+        // computing their own diagnostics is exactly how the JSON form came to
+        // be missing the one below about file permissions, and how the two
+        // forms came to disagree about a security-relevant fact.
+        //
+        // A superset of Config::warnings, which is only ever about the file's
+        // *contents*. This is `config check`'s whole answer, and the mode of
+        // the file is part of it.
+        std::vector<std::string> warnings = cfg.warnings;
+        bool literalKey = false;
+        for (const auto& p : cfg.ext.providers) literalKey |= !p.apiKey.empty();
+        if (literalKey && !cfg.source.empty()) {
+            // Worth saying whether or not the file also has a problem in it -
+            // and it used to be skipped entirely when it did. A key in a
+            // world-readable file is a key anyone with an account on the
+            // machine can read, and a typo on line 12 does not make that
+            // wait its turn.
+            const fs::perms mode = fs::status(path, ec).permissions();
+            if ((mode & (fs::perms::group_all | fs::perms::others_all)) != fs::perms::none)
+                warnings.push_back("it holds an API key and is readable by others -"
+                                   " `chmod 600 " + path + "`");
+        }
+
         // The only verdict here that is not the daemon's, so the only one that
         // has to build its own reply line. Same envelope as every other --json
         // answer, because `asuna --json <anything> | jq .ok` should mean one
@@ -625,7 +652,7 @@ int cmdConfig(int argc, char** argv, int from) {
             d.str("path", path);
             d.boolean("exists", !cfg.source.empty());
             d.raw("problems", ipc::Out::array(cfg.problems));
-            d.raw("warnings", ipc::Out::array(cfg.warnings));
+            d.raw("warnings", ipc::Out::array(warnings));
             const std::string body = d.done();
             if (cfg.problems.empty()) {
                 printf("%s\n", ipc::ok(body).c_str());
@@ -644,28 +671,18 @@ int cmdConfig(int argc, char** argv, int from) {
             // "fine" only when it is. A file whose max_height does nothing is
             // not broken - it starts, and it behaves the way the warning says -
             // but telling somebody it is fine is how they stop looking.
-            if (cfg.warnings.empty()) {
+            if (warnings.empty()) {
                 printf("asuna: %s is fine\n", path.c_str());
             } else {
-                printf("asuna: %s parses, with %zu setting(s) that do nothing\n",
-                       path.c_str(), cfg.warnings.size());
-                for (const std::string& w : cfg.warnings) printf("  %s\n", w.c_str());
-            }
-            // Not a problem with the file's contents, so not in the list above -
-            // but worth one line, because a key in a world-readable file is a
-            // key anyone with an account on the machine can read.
-            bool literalKey = false;
-            for (const auto& p : cfg.ext.providers) literalKey |= !p.apiKey.empty();
-            const fs::perms mode = fs::status(path, ec).permissions();
-            if (literalKey && (mode & (fs::perms::group_all | fs::perms::others_all)) !=
-                                  fs::perms::none) {
-                printf("       it holds an API key and is readable by others -"
-                       " `chmod 600 %s`\n", path.c_str());
+                printf("asuna: %s parses, with %zu thing(s) worth knowing\n",
+                       path.c_str(), warnings.size());
+                for (const std::string& w : warnings) printf("  %s\n", w.c_str());
             }
             return kOk;
         }
         fprintf(stderr, "asuna: %s\n", path.c_str());
         for (const std::string& p : cfg.problems) fprintf(stderr, "  %s\n", p.c_str());
+        for (const std::string& w : warnings) fprintf(stderr, "  %s\n", w.c_str());
         return kError;
     }
     if (verb == "edit") {
@@ -757,22 +774,22 @@ int extArgv(const Config& cfg, std::vector<std::string>* argv) {
 // running", because those are different things to whoever is reading: one means
 // the helper stopped, the other means it stopped *and* something else is now
 // wearing its number.
+daemon::Identity extIdentity(bool quiet = false) {
+    const daemon::Identity id = daemon::readPidFile(paths::extPidPath());
+    if (id.state == daemon::Owner::kRecycled && !quiet)
+        fprintf(stderr, "asuna: %s names pid %d, which is now a different process -"
+                        " the helper is gone\n",
+                paths::extPidPath().c_str(), static_cast<int>(id.pid));
+    return id;
+}
+
+// The pid to *report*, which is a lower bar than the pid to signal: an old pid
+// file that cannot prove which process it names still answers "something is
+// there", and saying "not running" about a helper that plainly is would be
+// worse than saying so with a caveat. Nothing here signals - see cmdExtStop.
 pid_t extPid(bool quiet = false) {
-    pid_t pid = 0;
-    switch (daemon::readPidFile(paths::extPidPath(), &pid)) {
-        case daemon::Owner::kAlive:
-        case daemon::Owner::kUnverified:
-            return pid;
-        case daemon::Owner::kRecycled:
-            if (!quiet)
-                fprintf(stderr, "asuna: %s names pid %d, which is now a different process -"
-                                " the helper is gone\n",
-                        paths::extPidPath().c_str(), static_cast<int>(pid));
-            return 0;
-        case daemon::Owner::kGone:
-            return 0;
-    }
-    return 0;
+    const daemon::Identity id = extIdentity(quiet);
+    return id.present() ? id.pid : 0;
 }
 
 int cmdExtStart(const Config& cfg) {
@@ -848,30 +865,56 @@ int cmdExtStart(const Config& cfg) {
     return kError;
 }
 
-int cmdExtStop() {
+int cmdExtStop(bool force = false) {
     // Loud here of all places: this is the verb that sends the signal, so a pid
     // file naming somebody else is the exact thing the caller needs told before
     // being reassured that nothing was running.
-    const pid_t pid = extPid();
+    const daemon::Identity id = extIdentity();
     std::error_code ec;
-    if (pid <= 0) {
+    if (!id.present()) {
         fs::remove(paths::extPidPath(), ec);
         return complain("the helper is not running", kOk);
     }
-    // Remembered before the signal, and checked again before escalating: the
-    // helper can exit inside the five seconds below and the pid be handed to
-    // something else in the same window, and SIGKILL is not a signal to send on
-    // a guess. `alive` is "still the process we just asked to stop", not "some
-    // process has this number".
-    const unsigned long long began = daemon::startTime(pid);
-    const auto alive = [&] { return daemon::startTime(pid) == began && began != 0; };
 
-    kill(pid, SIGTERM);
+    // A handle to the process, not to the number, and *every* signal below goes
+    // through it. The first one used to go out on the strength of a check made
+    // before it, which is a window: the helper can exit and its pid be reissued
+    // between deciding and killing. Opening once and signalling through the
+    // handle removes that, including for the SIGKILL five seconds later.
+    daemon::Signal target;
+    if (!target.open(id)) {
+        if (id.state == daemon::Owner::kUnverified && !force) {
+            // Something is running under that number, and nothing here can show
+            // it is the helper: the file predates start times. `status` may be
+            // generous about that; this verb may not, because being wrong here
+            // means signalling a stranger. The pid is named so that checking it
+            // by hand is one command away.
+            fprintf(stderr,
+                    "asuna: %s was written by an older version and does not record which\n"
+                    "       process it means. Something is running as pid %d, but it cannot be\n"
+                    "       shown to be her helper, so nothing has been signalled.\n"
+                    "       Check it with `ps -p %d -o args=`, then either `asuna ext stop\n"
+                    "       --force`, or delete that file if it is not her helper.\n",
+                    paths::extPidPath().c_str(), static_cast<int>(id.pid),
+                    static_cast<int>(id.pid));
+            return kError;
+        }
+        // --force, or a process that ended between reading the file and here.
+        if (!target.openUnproven(id.pid)) {
+            fs::remove(paths::extPidPath(), ec);
+            return complain("the helper is not running", kOk);
+        }
+        fprintf(stderr, "asuna: --force: signalling pid %d without having proved it is"
+                        " her helper\n", static_cast<int>(id.pid));
+    }
+
+    const int pid = static_cast<int>(id.pid);
+    target.send(SIGTERM);
     const int deadline = nowMs() + kTermTimeoutMs;
-    while (nowMs() < deadline && alive()) usleep(50 * 1000);
-    if (alive()) {
+    while (nowMs() < deadline && target.alive()) usleep(50 * 1000);
+    if (target.alive()) {
         fprintf(stderr, "asuna: it ignored SIGTERM; killing pid %d\n", pid);
-        kill(pid, SIGKILL);
+        target.send(SIGKILL);
     }
     fs::remove(paths::extPidPath(), ec);
     printf("asuna: helper stopped\n");
@@ -911,6 +954,14 @@ int cmdExtTest(const Config& cfg) {
 int cmdExt(int argc, char** argv, int from) {
     const std::string verb = from < argc ? argv[from] : "status";
 
+    // `--force` on the two verbs that signal. Only ever means "signal a pid
+    // whose identity the pid file cannot prove"; it does not skip any other
+    // check, and it never applies to a file that has been shown to name
+    // something else.
+    bool force = false;
+    for (int i = from; i < argc; ++i)
+        if (strcmp(argv[i], "--force") == 0) force = true;
+
     if (verb == "start" || verb == "restart" || verb == "test") {
         Config cfg;
         cfg.load(Config::path());
@@ -923,10 +974,16 @@ int cmdExt(int argc, char** argv, int from) {
         // Quiet: cmdExtStart says the same thing a line later if the pid file
         // turns out to name a stranger, and hearing it twice from one command
         // reads like it happened twice.
-        if (verb == "restart" && extPid(true) > 0) cmdExtStop();
+        //
+        // A stop that refuses ends the restart. Carrying on would run into
+        // cmdExtStart's own "already running" a moment later, having replaced
+        // the one message that explains what to do with one that does not.
+        if (verb == "restart" && extPid(true) > 0) {
+            if (const int stopped = cmdExtStop(force); stopped != kOk) return stopped;
+        }
         return cmdExtStart(cfg);
     }
-    if (verb == "stop") return cmdExtStop();
+    if (verb == "stop") return cmdExtStop(force);
     if (verb == "cancel") return simple("ext", ipc::Out().boolean("cancel", true).done());
     if (verb == "config") {
         int status = kError;

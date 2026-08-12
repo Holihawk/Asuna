@@ -251,6 +251,17 @@ is on screen, moving to another provider would write a second answer on top of t
 A provider that fails is skipped for two minutes rather than retried on every message, so
 one that is down does not slow down every question you ask.
 
+Failing counts a reply with **no content in it** — an immediate `[DONE]`, a stream of
+metadata deltas, an event shape nothing can be read out of. HTTP 200 and silence is not an
+answer, and treating it as one meant the fallback provider was never reached. Cancelling is
+the one thing that looks the same and is not a failure: it is you, so no provider is blamed
+or skipped for it.
+
+`asuna ext stop` refuses to signal a pid file it cannot prove names the helper — it records
+the process's start time as well as its number, so a recycled pid is recognised rather than
+signalled. A file written by a version before that carried no start time; `stop` says so,
+names the pid, and `--force` is how you say you have checked.
+
 A provider defined but left out of `providers` is parked, not ignored in silence —
 `asuna ext config` says it is there and unused. `asuna ext test` probes each one with a
 one-token request and reports what came back, which is the difference between "the key is
@@ -824,8 +835,8 @@ ctest --test-dir build          # 10 suites, no compositor, no GPU, no network
 | `argparse` | what the command line is allowed to say: malformed numbers, boundaries, overflow, and the quoting grammar shared with the Python end |
 | `json` | the shared reader and writer — the RFC 8259 number grammar, control characters in strings, and that everything `quote` writes parses back to itself |
 | `state` | what she remembers between runs, against a temporary `XDG_STATE_HOME` it refuses to run without |
-| `daemon` | whether a pid file still names the process that wrote it, which is what stands between `ext stop` and a stranger who inherited the number |
-| `cli` | the real binary, one command at a time: which bound each flag is given, and what `config check` says in each shape. Nothing here starts a daemon or touches a running one |
+| `daemon` | whether a pid file still names the process that wrote it, and the refusal to signal one that cannot be proved — what stands between `ext stop` and a stranger who inherited the number |
+| `cli` | the real binary, one command at a time: which bound each flag is given, what `config check` says in each shape, and what the client prints for a reply from a daemon. Nothing here starts a daemon or touches a running one — the daemon-backed cases talk to `tests/fake_daemon.py`, a socket that answers with a canned line and nothing else |
 | `ext` | the helper's provider failover, offline: an empty stream, a dead endpoint, an HTTP status, a stream that dies mid-answer, and cancellation — which is not the endpoint's fault and must not be treated as one |
 
 `ext` runs `tools/asuna-ext.py` with `Provider.request` replaced by canned responses, so it

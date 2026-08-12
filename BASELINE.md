@@ -96,11 +96,11 @@ there on. `ext` is the first suite that is not C++; see its row below.
 | `ipc` | `ipc.cpp`, `json.cpp`, `paths.cpp` | `ipc: all checks passed` (9 groups) |
 | `config` | `config.cpp`, `paths.cpp` | `all config tests passed` (7 groups; `cross-field warnings` added in Phase 2.2) |
 | `argparse` | `argparse.cpp` | `all 16 tests passed` — **added in Phase 1** |
-| `cli` | the built `asuna` binary | `all 58 cli checks passed` — **added in Phase 1**, extended in Phases 2.1 and 3; no case reaches a real daemon, so it neither needs her running nor disturbs her if she is |
+| `cli` | the built `asuna` binary | `all 86 cli checks passed` — **added in Phase 1**, extended in Phases 2.1, 3 and 3.1; no case reaches a real daemon, so it neither needs her running nor disturbs her if she is |
 | `state` | `state.cpp`, `json.cpp`, `paths.cpp` | `all 14 state tests passed` — **added in Phase 2**; runs against a temporary `XDG_STATE_HOME` and refuses to start if that redirect did not take |
 | `json` | `json.cpp` | `all 12 json tests passed` — **added in Phase 2.1**; the number grammar, the string rules and the quote/parse pair |
-| `daemon` | `daemon.cpp` | `all 9 daemon tests passed` — **added in Phase 3**; pid-file identity, including a recycled pid and a file from an older build |
-| `ext` | `tools/asuna-ext.py` via `python3` | `all 14 ext tests passed` — **added in Phase 3**; provider failover with `Provider.request` replaced by canned responses, so no network and no API key. Skipped if `python3` is absent, which would also mean the helper could not run |
+| `daemon` | `daemon.cpp` | `all 14 daemon tests passed` — **added in Phase 3**, extended in Phase 3.1; pid-file identity *and* the signal decision that follows it - a recycled pid, a file from an older build, and a handle that refuses to signal what it cannot prove |
+| `ext` | `tools/asuna-ext.py` via `python3` | `all 16 ext tests passed` — **added in Phase 3**, extended in Phase 3.1; provider failover with `Provider.request` replaced by canned responses, so no network and no API key. Skipped if `python3` is absent, which would also mean the helper could not run |
 
 `behaviour` must run from the source tree — it reads `data/dialogue.zh.json`
 (CMakeLists.txt:120-121).

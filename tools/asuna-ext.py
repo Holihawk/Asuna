@@ -271,17 +271,35 @@ class Chat:
                 payload = line[5:].strip()
                 if payload == "[DONE]":
                     break
+                # Every container checked before it is indexed or asked for a
+                # key. Catching ValueError/KeyError/IndexError around the whole
+                # chain was not enough: `{"choices":[{"delta":null}]}` is valid
+                # JSON, and `None.get` is an AttributeError, which escaped past
+                # the failover in ask() entirely - the helper survived it at the
+                # supervisory boundary, but the next provider was never tried
+                # and the answer was simply lost. One malformed event is not
+                # worth abandoning an answer that is otherwise arriving, so
+                # these are skipped and counted; a stream that is *all* of them
+                # yields nothing, which is the empty case, which fails over.
                 try:
-                    delta = json.loads(payload)["choices"][0]["delta"]
-                except (ValueError, KeyError, IndexError):
-                    # One malformed event is not worth abandoning an answer
-                    # that is otherwise arriving, so it is skipped - but
-                    # silently skipping every one of them is how a provider
-                    # that speaks a different dialect looks like a provider
-                    # that is merely quiet. Counted, and said once at the end.
+                    event = json.loads(payload)
+                except ValueError:
+                    unreadable += 1
+                    continue
+                choices = event.get("choices") if isinstance(event, dict) else None
+                if not isinstance(choices, list) or not choices:
+                    unreadable += 1
+                    continue
+                delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                if not isinstance(delta, dict):
                     unreadable += 1
                     continue
                 piece = delta.get("content")
+                if piece is None:
+                    continue   # a metadata-only delta: role, finish_reason
+                if not isinstance(piece, str):
+                    unreadable += 1
+                    continue
                 if piece:
                     yield piece
         if unreadable:
@@ -743,6 +761,16 @@ class Helper:
     def subscriber(self):
         try:
             for event in self.control.events():
+                # Cancellation is acted on *here*, in this thread, rather than
+                # waited for by the run loop below. The loop calls converse()
+                # synchronously, so while there is a conversation to cancel the
+                # loop is inside it and is not reading this queue at all - the
+                # cancel would sit here until the thing it was meant to
+                # interrupt had already finished, which is to say never in time.
+                # threading.Event is the one piece of state safe to set from
+                # here, which is exactly why the cancel flag is one.
+                if event.get("event") == "cancel":
+                    self.cancelled.set()
                 self.events.put(event)
         except OSError as e:
             if self.running:
@@ -777,6 +805,9 @@ class Helper:
                 elif name == "chat":
                     self.guarded(self.converse, event.get("text", ""))
                 elif name == "cancel":
+                    # Already set by the subscriber thread the moment it
+                    # arrived; kept because setting it twice costs nothing and
+                    # this is where a reader looks for what the event does.
                     self.cancelled.set()
                 elif name == "config":
                     log("config reloaded")
