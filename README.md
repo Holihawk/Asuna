@@ -177,7 +177,7 @@ instead of the summary.
 | --- | --- |
 | `asuna hide` / `show` / `toggle` | Put her away without exiting. |
 | `asuna move <px\|left\|centre\|right>` | Glides rather than teleports. |
-| `asuna scale <0.5-2.5>` | |
+| `asuna scale <n>` | Clamped to 0.5–2.5, and to whatever the screen leaves room for — often the tighter of the two, so a number past the end is not an error, it lands at the ceiling. The `--scale` startup flag is the stricter one: it refuses anything outside 0.5–2.5 rather than starting her at a size you did not ask for. |
 | `asuna layer <top\|bottom\|overlay\|background>` | |
 | `asuna output [list\|<name>]` | Which monitor she lives on. |
 | `asuna menu [open\|close\|toggle]` | For a compositor keybind. |

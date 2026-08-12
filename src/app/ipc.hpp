@@ -32,11 +32,14 @@ namespace asuna {
 namespace ipc {
 
 // --- writing ---------------------------------------------------------------
-// Json (json.hpp) is read-only by design; nothing else in the pet writes JSON,
-// so the writer is here rather than there and is deliberately just enough for
-// one flat object of scalars plus the odd array.
+// The object builder is here because the protocol is the only thing that needs
+// one, and it is deliberately just enough for one flat object of scalars plus
+// the odd array. String escaping is *not* here: that is Json::quote, so the one
+// function that decides what a quote or a backslash becomes is the one sitting
+// next to the decoder that has to undo it. The state file writes through the
+// same one.
 
-std::string quote(const std::string& s);
+std::string quote(const std::string& s);   // Json::quote, under the local name
 
 // A JSON object under construction. Values go in already encoded, so nesting is
 // `raw(key, other.done())`.

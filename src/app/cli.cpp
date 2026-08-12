@@ -79,7 +79,7 @@ void usage() {
         "on screen\n"
         "  hide | show | toggle put her away without exiting, and bring her back\n"
         "  move <px|left|centre|right>\n"
-        "  scale <0.5-2.5>\n"
+        "  scale <n>                      clamped to 0.5-2.5 and to the screen\n"
         "  layer <top|bottom|overlay|background>\n"
         "  output [list|<name>]           which monitor she lives on\n"
         "  menu [open|close|toggle]       for a compositor keybind\n"
@@ -248,6 +248,14 @@ int parseOptions(int argc, char** argv, int from, ShellOptions* opt, bool* foreg
             if (!missing) argparse::realIn(a, v, lo, hi, &n, &problem);
             return n;
         };
+        // A floor and no ceiling. Distinct from fraction(lo, kNoMax, ...),
+        // which is a two-sided range that happens to end at INT_MAX.
+        auto atLeast = [&](double lo, double fallback) -> double {
+            const std::string v = next();
+            double n = fallback;
+            if (!missing) argparse::realAtLeast(a, v, lo, &n, &problem);
+            return n;
+        };
         if (a == "--model") opt->model = resolveModelArg(next());
         else if (a == "--layer") opt->layer = next();
         else if (a == "--output") opt->output = next();
@@ -265,7 +273,7 @@ int parseOptions(int argc, char** argv, int from, ShellOptions* opt, bool* foreg
         else if (a == "--gaze-halo") opt->gazeHalo = whole(0, argparse::kNoMax, opt->gazeHalo);
         else if (a == "--no-greet") opt->greet = false;
         else if (a == "--scale") opt->scale = static_cast<float>(fraction(0.5, 2.5, opt->scale));
-        else if (a == "--x") opt->x = fraction(0.0, argparse::kNoMax, opt->x);
+        else if (a == "--x") opt->x = atLeast(0.0, opt->x);
         else if (a == "--fps") opt->fps = whole(0, argparse::kNoMax, opt->fps);
         else if (a == "--hidden") opt->hidden = 1;
         else if (a == "--show") opt->hidden = 0;
@@ -1076,10 +1084,11 @@ int dispatch(int argc, char** argv, RunShell runShell) {
                 if (i + 1 >= argc) return complain("say --for needs a value", kUsage);
                 double seconds = 0;
                 std::string problem;
-                // Positive because it is a duration; the daemon reads 0 as "no
-                // timer at all", which is what leaving --for off already means.
-                if (!argparse::realIn("say --for", argv[++i], 0.001, argparse::kNoMax, &seconds,
-                                      &problem))
+                // Strictly positive, and with no floor of its own: the daemon
+                // reads 0 as "no timer at all", which is what leaving --for off
+                // already means, but anything above it is a duration this end
+                // has no business second-guessing.
+                if (!argparse::realAbove("say --for", argv[++i], 0.0, &seconds, &problem))
                     return complain(problem, kUsage);
                 args.num("seconds", seconds);
             }

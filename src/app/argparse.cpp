@@ -101,9 +101,37 @@ bool realIn(const std::string& label, const std::string& text, double lo, double
         return false;
     }
     if (v < lo || v > hi) {
-        *error = hi >= static_cast<double>(kNoMax)
-                     ? label + " must be at least " + plain(lo)
-                     : label + " must be between " + plain(lo) + " and " + plain(hi);
+        *error = label + " must be between " + plain(lo) + " and " + plain(hi);
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+bool realAtLeast(const std::string& label, const std::string& text, double lo, double* out,
+                 std::string* error) {
+    double v = 0;
+    if (!real(text, &v)) {
+        *error = label + " needs a number, not '" + text + "'";
+        return false;
+    }
+    if (v < lo) {
+        *error = label + " must be at least " + plain(lo);
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+bool realAbove(const std::string& label, const std::string& text, double lo, double* out,
+               std::string* error) {
+    double v = 0;
+    if (!real(text, &v)) {
+        *error = label + " needs a number, not '" + text + "'";
+        return false;
+    }
+    if (v <= lo) {
+        *error = label + " must be more than " + plain(lo);
         return false;
     }
     *out = v;

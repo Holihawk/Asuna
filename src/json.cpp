@@ -292,4 +292,31 @@ Json Json::parseFile(const std::string& path, std::string* error) {
     return out;
 }
 
+std::string Json::quote(const std::string& text) {
+    std::string out = "\"";
+    for (const unsigned char c : text) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            default:
+                // Only the C0 controls have to be escaped. Everything else goes
+                // through as-is, which keeps UTF-8 - her dialogue is Chinese -
+                // readable on the wire instead of a wall of \uXXXX.
+                if (c < 0x20) {
+                    char buf[7];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out + "\"";
+}
+
 }  // namespace asuna

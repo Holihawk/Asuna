@@ -266,9 +266,7 @@ void theComplaintNamesTheFlagAndTheValue() {
     asuna::argparse::realIn("--scale", "9", 0.5, 2.5, &d, &error);
     CHECK(error.find("between 0.5 and 2.5") != std::string::npos);
 
-    // Reals with no ceiling should read the same way, not "between 0 and
-    // 2.14748e+09" - which is what --x would otherwise say.
-    asuna::argparse::realIn("--x", "-5", 0.0, static_cast<double>(kNoMax), &d, &error);
+    asuna::argparse::realAtLeast("--x", "-5", 0.0, &d, &error);
     CHECK(error.find("at least 0") != std::string::npos);
     CHECK(error.find("e+09") == std::string::npos);
 
@@ -276,6 +274,32 @@ void theComplaintNamesTheFlagAndTheValue() {
     CHECK(asuna::argparse::realAny("move", "-500", &d, &error) && d == -500.0);
     CHECK(asuna::argparse::realAny("scale", "9", &d, &error) && d == 9.0);
     CHECK(!asuna::argparse::realAny("move", "1.2.3", &d, &error));
+}
+
+void aFloorWithNoCeilingIsNotARangeEndingAtIntMax() {
+    double d = 0;
+    std::string error;
+    // The bug this pins down: --x was written as realIn(0, kNoMax), and kNoMax
+    // is a real int that realIn really does compare against. A position of
+    // three billion was refused - by a message about zero, which sent the
+    // reader looking in exactly the wrong place.
+    CHECK(asuna::argparse::realAtLeast("--x", "3000000000", 0.0, &d, &error));
+    CHECK(d == 3000000000.0);
+    CHECK(asuna::argparse::realAtLeast("--x", "0", 0.0, &d, &error) && d == 0.0);
+    CHECK(!asuna::argparse::realAtLeast("--x", "-1", 0.0, &d, &error));
+    CHECK(!asuna::argparse::realAtLeast("--x", "nope", 0.0, &d, &error));
+    // Still finite-only, like everything else here.
+    CHECK(!asuna::argparse::realAtLeast("--x", "inf", 0.0, &d, &error));
+
+    // `say --for` is the exclusive one: zero is not a duration, it is how the
+    // daemon spells "no timer", which is what omitting --for already does.
+    CHECK(!asuna::argparse::realAbove("say --for", "0", 0.0, &d, &error));
+    CHECK(error.find("more than 0") != std::string::npos);
+    CHECK(!asuna::argparse::realAbove("say --for", "-3", 0.0, &d, &error));
+    // No millisecond floor: a short timer is a policy this end does not own.
+    CHECK(asuna::argparse::realAbove("say --for", "0.0001", 0.0, &d, &error));
+    CHECK(d == 0.0001);
+    CHECK(asuna::argparse::realAbove("say --for", "3600", 0.0, &d, &error) && d == 3600.0);
 }
 
 // --- the command tokenizer -------------------------------------------------
@@ -371,6 +395,7 @@ int main() {
         {"rangesAreInclusiveAtBothEnds", rangesAreInclusiveAtBothEnds},
         {"aRejectedValueLeavesTheDestinationAlone", aRejectedValueLeavesTheDestinationAlone},
         {"theComplaintNamesTheFlagAndTheValue", theComplaintNamesTheFlagAndTheValue},
+        {"aFloorWithNoCeilingIsNotARangeEndingAtIntMax", aFloorWithNoCeilingIsNotARangeEndingAtIntMax},
         {"theOrdinaryCommandsStillSplitTheSameWay", theOrdinaryCommandsStillSplitTheSameWay},
         {"quotedArgumentsHoldTogether", quotedArgumentsHoldTogether},
         {"escapesAreTheShlexSubset", escapesAreTheShlexSubset},

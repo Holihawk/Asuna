@@ -118,11 +118,23 @@ target_include_directories(asuna-config-test PRIVATE src)
 add_executable(asuna-argparse-test tests/argparse_test.cpp src/app/argparse.cpp)
 target_include_directories(asuna-argparse-test PRIVATE src)
 
+# What she remembers between runs. No GTK and no GL: the state file is JSON and
+# a path, and the suite points XDG_STATE_HOME at a temporary directory before
+# the first call, so it cannot see a real state.json let alone write one.
+add_executable(asuna-state-test
+  tests/state_test.cpp src/app/state.cpp src/json.cpp src/paths.cpp)
+target_include_directories(asuna-state-test PRIVATE src)
+
 enable_testing()
 add_test(NAME motion COMMAND asuna-motion-test)
 add_test(NAME ipc COMMAND asuna-ipc-test)
 add_test(NAME config COMMAND asuna-config-test)
 add_test(NAME argparse COMMAND asuna-argparse-test)
+add_test(NAME state COMMAND asuna-state-test)
+# The wiring rather than the parsers: which bound each flag is actually given.
+# Runs the real binary, and every case in it is decided before the control
+# socket is touched, so it neither needs her running nor disturbs her if she is.
+add_test(NAME cli COMMAND ${CMAKE_CURRENT_LIST_DIR}/tests/cli_test.sh $<TARGET_FILE:asuna>)
 # Reads the shipped data/dialogue.zh.json, so it runs from the source tree.
 add_test(NAME behaviour COMMAND asuna-behaviour-test
          WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR})

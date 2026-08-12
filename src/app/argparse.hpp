@@ -43,6 +43,18 @@ bool integerIn(const std::string& label, const std::string& text, int lo, int hi
 bool realIn(const std::string& label, const std::string& text, double lo, double hi, double* out,
             std::string* error);
 
+// Half-open versions, for the settings that have a floor but no machine-
+// independent ceiling. `kNoMax` must not be used as `hi` above to fake this:
+// it is a real int, `realIn` really does compare against it, and a pixel
+// position of three billion would be refused by a message about zero.
+//
+//   realAtLeast  v >= lo    --x, which cannot be negative but has no maximum
+//   realAbove    v >  lo    say --for, where zero already means "no timer"
+bool realAtLeast(const std::string& label, const std::string& text, double lo, double* out,
+                 std::string* error);
+bool realAbove(const std::string& label, const std::string& text, double lo, double* out,
+               std::string* error);
+
 // A real number with no range at all, for the values the daemon itself clamps.
 // Still rejects malformed text, which is the whole point.
 bool realAny(const std::string& label, const std::string& text, double* out, std::string* error);

@@ -37,9 +37,15 @@ struct State {
 
     static std::string path();
 
-    // Missing file is not a failure - it just means "first run", and the
-    // defaults above stand. Returns false only if the file exists but could not
-    // be read.
+    // Never fails the startup it is part of. A missing file means "first run";
+    // an unreadable or malformed one leaves every default above standing and
+    // says so on stderr - which the daemon has pointed at asuna.log. This file
+    // is disposable by design, and the alternative to carrying on without it is
+    // a pet that will not start because of its own scratchpad.
+    //
+    // Always returns true; the bool is kept because it is part of the shape
+    // callers were written against, and `if (mOpt.persist) mState.load();` is
+    // the only call there is.
     bool load();
 
     // Written to a temporary and renamed, so a crash mid-write cannot leave a

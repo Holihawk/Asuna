@@ -93,7 +93,9 @@ clean build. Phase 1 adds a fifth, `argparse`.
 | `behaviour` | `behaviour.cpp`, `dialogue.cpp`, `json.cpp` | `all 20 tests passed` |
 | `ipc` | `ipc.cpp`, `json.cpp`, `paths.cpp` | `ipc: all checks passed` (9 groups) |
 | `config` | `config.cpp`, `paths.cpp` | `all config tests passed` (6 groups) |
-| `argparse` | `argparse.cpp` | `all 15 tests passed` — **added in Phase 1** |
+| `argparse` | `argparse.cpp` | `all 16 tests passed` — **added in Phase 1** |
+| `cli` | the built `asuna` binary | `all 31 cli checks passed` — **added in Phase 1**; every case is decided before the control socket is touched, so it neither needs her running nor disturbs her if she is |
+| `state` | `state.cpp`, `json.cpp`, `paths.cpp` | `all 12 state tests passed` — **added in Phase 2**; runs against a temporary `XDG_STATE_HOME` and refuses to start if that redirect did not take |
 
 `behaviour` must run from the source tree — it reads `data/dialogue.zh.json`
 (CMakeLists.txt:120-121).
@@ -293,7 +295,7 @@ To be run before starting and after finishing each phase:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# tests — expect 4/4 at Phase 0, 5/5 from Phase 1 on
+# tests — 4/4 at Phase 0, 6/6 from Phase 1, 7/7 from Phase 2
 ctest --test-dir build --output-on-failure
 
 # python — expect exit 0, then clean up

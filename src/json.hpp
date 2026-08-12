@@ -14,9 +14,12 @@ namespace asuna {
 // mis-reads anything nested - which is exactly the class of fault that left the
 // physics dead for two phases - so this parses properly.
 //
-// Read-only by design: nothing in the pet writes JSON. Missing members return a
-// shared null value rather than throwing, so callers can chain lookups and check
-// the result once.
+// Reading is the bulk of it: missing members return a shared null value rather
+// than throwing, so callers can chain lookups and check the result once. The one
+// thing written here is `quote`, which is the counterpart of the string decoder
+// below and belongs beside it - two places that disagree about what a backslash
+// means is exactly how a written file stops being readable. `ipc::quote` and
+// `State::save` both go through it.
 class Json {
 public:
     enum class Type { Null, Bool, Number, String, Array, Object };
@@ -47,6 +50,12 @@ public:
     // human-readable reason in it. A parse that succeeds never sets `error`.
     static Json parse(const std::string& text, std::string* error = nullptr);
     static Json parseFile(const std::string& path, std::string* error = nullptr);
+
+    // `text` as a JSON string literal, quotes included. Escapes what has to be
+    // escaped and nothing else: UTF-8 goes through untouched, so her Chinese
+    // dialogue and a path with a non-ASCII directory in it stay readable in the
+    // file rather than becoming a wall of \uXXXX.
+    static std::string quote(const std::string& text);
 
 private:
     Type mType = Type::Null;

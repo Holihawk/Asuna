@@ -1,12 +1,12 @@
 #include "app/state.hpp"
 
-#include <cctype>
+#include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 
+#include "json.hpp"
 #include "paths.hpp"
 
 namespace fs = std::filesystem;
@@ -16,31 +16,6 @@ namespace {
 
 fs::path stateDir() { return paths::stateDir(); }
 
-// The file holds four scalars written by us. A real JSON parser would be more
-// code than the document has content, so scan for the key and read what follows.
-// String values are taken verbatim: the only string is a filesystem path, and a
-// path containing a quote or a backslash would have failed to load anyway.
-bool findValue(const std::string& text, const char* key, std::string* out) {
-    const std::string needle = std::string("\"") + key + "\"";
-    size_t p = text.find(needle);
-    if (p == std::string::npos) return false;
-    p = text.find(':', p + needle.size());
-    if (p == std::string::npos) return false;
-    ++p;
-    while (p < text.size() && isspace(static_cast<unsigned char>(text[p]))) ++p;
-    if (p >= text.size()) return false;
-
-    if (text[p] == '"') {
-        const size_t end = text.find('"', ++p);
-        if (end == std::string::npos) return false;
-        *out = text.substr(p, end - p);
-    } else {
-        const size_t end = text.find_first_of(",}\n\r \t", p);
-        *out = text.substr(p, end == std::string::npos ? end : end - p);
-    }
-    return !out->empty();
-}
-
 }  // namespace
 
 std::string State::path() { return (stateDir() / "state.json").string(); }
@@ -49,23 +24,47 @@ bool State::load() {
     std::ifstream f(path());
     if (!f) return true;   // first run
 
+    // Parsed rather than scanned. The scan this replaces looked for `"x"`
+    // anywhere in the file, which meant a model path containing the text of
+    // another key could answer for that key, and it stopped a string at the
+    // first `"` - so a path with a quote or a backslash in it came back cut
+    // short or as invalid JSON. Both are legal in a Linux filename.
     std::stringstream ss;
     ss << f.rdbuf();
-    const std::string text = ss.str();
+    std::string reason;
+    const Json doc = Json::parse(ss.str(), &reason);
+    if (!doc.isObject()) {
+        // Not fatal, and deliberately so: this file is disposable, and refusing
+        // to start because of it would be a pet held hostage by its own
+        // scratchpad. Said out loud, though - the alternative is a position and
+        // an outfit that silently revert on every login.
+        fprintf(stderr, "asuna: ignoring %s - %s\n", path().c_str(),
+                reason.empty() ? "not a JSON object" : reason.c_str());
+        return true;
+    }
 
-    std::string v;
-    // A malformed value leaves the corresponding default in place rather than
-    // aborting the load: half a remembered state beats none.
-    if (findValue(text, "x", &v)) {
-        try { x = std::stod(v); } catch (...) { x = -1.0; }
-    }
-    if (findValue(text, "scale", &v)) {
-        try { scale = std::stof(v); } catch (...) { scale = -1.0f; }
-    }
-    findValue(text, "model", &model);
-    findValue(text, "layer", &layer);
-    findValue(text, "output", &output);
-    if (findValue(text, "hidden", &v)) hidden = (v == "true" || v == "1") ? 1 : 0;
+    // Per-field tolerance survives the change: a member that is missing or of
+    // the wrong type leaves its default in place, because half a remembered
+    // state beats none. Present-but-wrong is worth a line though - it is the
+    // one case that means somebody edited this file and got it wrong, and a
+    // setting that quietly does nothing is the thing that wastes an evening.
+    std::string wrong;
+    const auto shaped = [&](const char* key, Json::Type want) {
+        const Json::Type got = doc[key].type();
+        if (got == want) return true;
+        if (got != Json::Type::Null) wrong += wrong.empty() ? key : std::string(", ") + key;
+        return false;
+    };
+
+    if (shaped("x", Json::Type::Number)) x = doc["x"].asNumber();
+    if (shaped("scale", Json::Type::Number)) scale = static_cast<float>(doc["scale"].asNumber());
+    if (shaped("model", Json::Type::String)) model = doc["model"].asString();
+    if (shaped("layer", Json::Type::String)) layer = doc["layer"].asString();
+    if (shaped("output", Json::Type::String)) output = doc["output"].asString();
+    if (shaped("hidden", Json::Type::Bool)) hidden = doc["hidden"].asBool() ? 1 : 0;
+
+    if (!wrong.empty())
+        fprintf(stderr, "asuna: %s: ignoring %s - wrong type\n", path().c_str(), wrong.c_str());
     return true;
 }
 
@@ -78,12 +77,21 @@ bool State::save() const {
     {
         std::ofstream f(tmp, std::ios::trunc);
         if (!f) return false;
+        // Every string goes through Json::quote. A model path is a filename,
+        // and a filename may legally hold a quote, a backslash or a newline;
+        // written raw, any of the three produced a file that would not parse
+        // and took the position and the outfit down with it.
+        //
+        // lround rather than (long)(x + 0.5): the two agree everywhere she
+        // actually stands, but x carries -1 for "never placed", and adding a
+        // half to that truncates to 0 - which reads back as "placed hard against
+        // the left edge" and outranks the config's anchor for good.
         f << "{\n"
-          << "  \"x\": " << static_cast<long>(x + 0.5) << ",\n"
+          << "  \"x\": " << std::lround(x) << ",\n"
           << "  \"scale\": " << scale << ",\n"
-          << "  \"model\": \"" << model << "\",\n"
-          << "  \"layer\": \"" << layer << "\",\n"
-          << "  \"output\": \"" << output << "\",\n"
+          << "  \"model\": " << Json::quote(model) << ",\n"
+          << "  \"layer\": " << Json::quote(layer) << ",\n"
+          << "  \"output\": " << Json::quote(output) << ",\n"
           << "  \"hidden\": " << (hidden > 0 ? "true" : "false") << "\n"
           << "}\n";
         if (!f) return false;
