@@ -230,9 +230,9 @@ ipc::Reply Shell::handleCommand(const Json& req) {
     }
 
     if (cmd == "config") {
-        std::vector<std::string> problems;
+        std::vector<std::string> problems, warnings;
         std::string note;
-        const std::string where = reloadConfig(&problems, &note);
+        const std::string where = reloadConfig(&problems, &warnings, &note);
         if (!problems.empty()) {
             ipc::Out d;
             d.raw("problems", ipc::Out::array(problems));
@@ -244,7 +244,14 @@ ipc::Reply Shell::handleCommand(const Json& req) {
                              std::to_string(problems.size()) + " problem(s)",
                              d.done());
         }
-        return ipc::ok(ipc::Out().str("path", where).str("note", note).done());
+        // The reload did happen. The warnings ride along with the success
+        // because they are about the file that was just applied, and this is
+        // the only moment the person who edited it is listening.
+        ipc::Out d;
+        d.str("path", where);
+        d.str("note", note);
+        d.raw("warnings", ipc::Out::array(warnings));
+        return ipc::ok(d.done());
     }
 
     if (cmd == "model") {

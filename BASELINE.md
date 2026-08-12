@@ -93,7 +93,7 @@ Phase 2.1 adds `json`.
 | `motion` | `motion.cpp` | `all 15 tests passed` |
 | `behaviour` | `behaviour.cpp`, `dialogue.cpp`, `json.cpp` | `all 17 tests passed` — was 20; the three JSON tests moved to `json` in Phase 2.1 |
 | `ipc` | `ipc.cpp`, `json.cpp`, `paths.cpp` | `ipc: all checks passed` (9 groups) |
-| `config` | `config.cpp`, `paths.cpp` | `all config tests passed` (6 groups) |
+| `config` | `config.cpp`, `paths.cpp` | `all config tests passed` (7 groups; `cross-field warnings` added in Phase 2.2) |
 | `argparse` | `argparse.cpp` | `all 16 tests passed` — **added in Phase 1** |
 | `cli` | the built `asuna` binary | `all 44 cli checks passed` — **added in Phase 1**, extended in Phase 2.1; no case reaches a real daemon, so it neither needs her running nor disturbs her if she is |
 | `state` | `state.cpp`, `json.cpp`, `paths.cpp` | `all 14 state tests passed` — **added in Phase 2**; runs against a temporary `XDG_STATE_HOME` and refuses to start if that redirect did not take |
@@ -154,6 +154,12 @@ marked `+` (full body, taller strip). Ids are non-contiguous — `01-09`, then
 ```
 asuna: /home/hhk/.config/asuna/config.toml is fine
 ```
+
+Unchanged through Phase 2.2. That phase added a second, non-fatal outcome for a
+file that parses but contains a setting another setting overrides — it prints
+`… parses, with N setting(s) that do nothing` followed by the lines, and still
+exits **0**, because nothing is wrong with the file and a check that fails on
+it would fail a config that runs. This machine's config triggers none of them.
 
 ### `asuna ext status` → **exit 3**
 

@@ -59,6 +59,12 @@ void checkNear(double got, double want, const std::string& what) {
 }
 
 // Parses and asserts a clean read, returning the config.
+//
+// Clean means no warnings either. That is not decoration: the cross-field
+// checks look at every config, including ones that never mention the keys they
+// are about, so every ordinary parse in this file doubles as an assertion that
+// they stay quiet when there is nothing to say. A warning nobody needed is as
+// bad as a missing one - it teaches you to skip the output.
 asuna::Config good(const std::string& text, const std::string& what) {
     asuna::Config c;
     c.parse(text);
@@ -67,6 +73,32 @@ asuna::Config good(const std::string& text, const std::string& what) {
         for (const auto& p : c.problems) printf("        %s\n", p.c_str());
         ++gFailures;
     }
+    if (!c.warnings.empty()) {
+        printf("  FAIL  %s: unexpected warnings\n", what.c_str());
+        for (const auto& w : c.warnings) printf("        %s\n", w.c_str());
+        ++gFailures;
+    }
+    return c;
+}
+
+// Parses and asserts that it was *accepted* - warnings never refuse a file -
+// and that something in the warning list mentions `mentions`.
+asuna::Config warns(const std::string& text, const std::string& mentions,
+                    const std::string& what) {
+    asuna::Config c;
+    const bool ok = c.parse(text);
+    if (!ok || !c.problems.empty()) {
+        printf("  FAIL  %s: refused the file, expected a warning about '%s'\n", what.c_str(),
+               mentions.c_str());
+        for (const auto& p : c.problems) printf("        %s\n", p.c_str());
+        ++gFailures;
+        return c;
+    }
+    for (const auto& w : c.warnings)
+        if (w.find(mentions) != std::string::npos) return c;
+    printf("  FAIL  %s: no warning mentioned '%s'\n", what.c_str(), mentions.c_str());
+    for (const auto& w : c.warnings) printf("        %s\n", w.c_str());
+    ++gFailures;
     return c;
 }
 
@@ -201,6 +233,52 @@ void testComplaints() {
     check(many.problems.size() >= 3, "three mistakes are reported as three, not one");
 }
 
+// --- settings that parse and then do nothing --------------------------------
+
+void testWarnings() {
+    printf("cross-field warnings\n");
+
+    // The one the Phase 2 review found. Pet::preferredBoxHeight resolves this as
+    // max(height, min(want, max_height)), so a ceiling below the floor is never
+    // reached and max_height simply has no effect.
+    const asuna::Config low = warns("[strip]\nheight = 700\nmax_height = 500\n", "max_height",
+                                    "a ceiling below the height it caps");
+    // Warned about, and still applied exactly as written. The whole reason this
+    // is not a problem is that the behaviour is defined and unchanged.
+    check(low.height == 700, "the warned-about value is still applied");
+    check(low.maxHeight == 500, "and so is the one that does nothing");
+    check(low.problems.empty(), "a contradiction does not refuse the file");
+
+    // The likely way in: raise height, forget the ceiling. max_height is never
+    // named in this file and the warning still has to fire, because the
+    // contradiction is with the built-in default.
+    warns("[strip]\nheight = 900\n", "max_height", "a height raised past the default ceiling");
+
+    // Every line capped at max_seconds, so base and per_glyph do nothing.
+    warns("[bubble]\nbase_seconds = 6.0\nmax_seconds = 3.0\n", "max_seconds",
+          "a bubble cap below its own floor");
+    // And the number reads back the way it was typed, not as 3.000000.
+    const asuna::Config bubble = warns("[bubble]\nbase_seconds = 6.0\nmax_seconds = 3.0\n",
+                                       "3)", "the warning quotes the value plainly");
+    check(!bubble.warnings.empty(), "the bubble warning is there to quote");
+
+    // Equal is not a contradiction: "never grow past the bust height" and "never
+    // stay up longer than the base" are both things somebody may mean.
+    good("[strip]\nheight = 600\nmax_height = 600\n", "a ceiling equal to the height");
+    good("[bubble]\nbase_seconds = 3.0\nmax_seconds = 3.0\n", "a cap equal to the base");
+    // Neither is the ordinary case, which is what `good` asserts everywhere else
+    // in this file. Stated once explicitly so the intent is not just implied.
+    good("[strip]\nheight = 500\n", "a height under the default ceiling");
+    good("", "an empty file warns about nothing");
+
+    // Two contradictions are two lines. Same argument as the problem list: a
+    // config fixed one complaint per run is a miserable loop.
+    asuna::Config both;
+    both.parse("[strip]\nheight = 900\n[bubble]\nbase_seconds = 6.0\nmax_seconds = 3.0\n");
+    check(both.warnings.size() == 2, "two contradictions are reported as two");
+    check(both.problems.empty(), "and neither of them refuses the file");
+}
+
 // --- the file `config init` writes ------------------------------------------
 
 void testDefaultText() {
@@ -214,6 +292,14 @@ void testDefaultText() {
         for (const auto& p : written.problems) printf("        %s\n", p.c_str());
         ++gFailures;
         return;
+    }
+    // And nothing in it contradicts anything else in it. The file is the
+    // documentation, so a warning here would be the documentation telling you
+    // one of its own defaults does nothing.
+    if (!written.warnings.empty()) {
+        printf("  FAIL  `asuna config init` writes a file this build warns about\n");
+        for (const auto& w : written.warnings) printf("        %s\n", w.c_str());
+        ++gFailures;
     }
 
     // It claims every setting is at its default. Check the claim - if a default
@@ -500,6 +586,7 @@ void testPath() {
 int main() {
     testReading();
     testComplaints();
+    testWarnings();
     testDefaultText();
     testExt();
     testMultiLineStrings();

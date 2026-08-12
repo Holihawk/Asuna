@@ -183,7 +183,13 @@ private:
     // Re-reads the config file and applies everything state.json does not own.
     // Returns the file it read, empty if it refused; `note` gets anything the
     // user needs to hear about a setting that could not be applied live.
-    std::string reloadConfig(std::vector<std::string>* problems, std::string* note);
+    //
+    // `problems` refuses the reload, `warnings` does not - a setting that does
+    // nothing because another one overrides it still gets applied, and is
+    // reported so it is not a silent nothing. Both are filled either way, so a
+    // caller that refuses still has the warnings to show.
+    std::string reloadConfig(std::vector<std::string>* problems,
+                             std::vector<std::string>* warnings, std::string* note);
     // The settings the config supplies that can change under a running pet:
     // called by reloadConfig, and by nothing else.
     void applyTunables();

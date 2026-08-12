@@ -199,6 +199,17 @@ int simple(const std::string& cmd, const std::string& args = "") {
 // here treats a missing piece as "use the default", but a config file is
 // something the user wrote on purpose and is watching for the effect of, and
 // twenty minutes of wondering why line 12 does nothing is worse than an error.
+// The other half of the same argument, for the settings that parse and are in
+// range and still do nothing because another one overrides them. Said, and then
+// carried on from - see the note on Config::warnings for why these are not
+// problems. Printed under the path so it reads the same as a complaint does.
+void sayWarnings(const Config& cfg) {
+    if (cfg.warnings.empty()) return;
+    fprintf(stderr, "asuna: %s\n", cfg.source.empty() ? Config::path().c_str()
+                                                      : cfg.source.c_str());
+    for (const std::string& w : cfg.warnings) fprintf(stderr, "  %s\n", w.c_str());
+}
+
 int applyConfig(ShellOptions* opt) {
     Config cfg;
     cfg.load(Config::path());
@@ -207,6 +218,7 @@ int applyConfig(ShellOptions* opt) {
         for (const std::string& p : cfg.problems) fprintf(stderr, "  %s\n", p.c_str());
         return kUsage;
     }
+    sayWarnings(cfg);
     cfg.applyTo(opt);
     return kOk;
 }
@@ -608,7 +620,16 @@ int cmdConfig(int argc, char** argv, int from) {
             return kOk;
         }
         if (cfg.problems.empty()) {
-            printf("asuna: %s is fine\n", path.c_str());
+            // "fine" only when it is. A file whose max_height does nothing is
+            // not broken - it starts, and it behaves the way the warning says -
+            // but telling somebody it is fine is how they stop looking.
+            if (cfg.warnings.empty()) {
+                printf("asuna: %s is fine\n", path.c_str());
+            } else {
+                printf("asuna: %s parses, with %zu setting(s) that do nothing\n",
+                       path.c_str(), cfg.warnings.size());
+                for (const std::string& w : cfg.warnings) printf("  %s\n", w.c_str());
+            }
             // Not a problem with the file's contents, so not in the list above -
             // but worth one line, because a key in a world-readable file is a
             // key anyone with an account on the machine can read.
@@ -658,6 +679,12 @@ int cmdConfig(int argc, char** argv, int from) {
                    "       those are state.json's, and it outranks the config file\n");
             const std::string note = d["note"].asString();
             if (!note.empty()) printf("       note: %s\n", note.c_str());
+            // It reloaded, and some of what was reloaded does nothing. On
+            // stderr rather than with the success above, because it is the one
+            // part of this output somebody might want to grep for.
+            const Json& warnings = d["warnings"];
+            for (size_t i = 0; i < warnings.size(); ++i)
+                fprintf(stderr, "  %s\n", warnings[i].asString().c_str());
         }
         return kOk;
     }

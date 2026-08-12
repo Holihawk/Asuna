@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <initializer_list>
@@ -13,6 +14,15 @@
 
 namespace asuna {
 namespace {
+
+// "%g" rather than std::to_string, which writes 9.000000 for 9. Only used for
+// the warnings, where the number is quoted back at the user and reading like
+// what they typed is the whole point.
+std::string plain(double v) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%g", v);
+    return buf;
+}
 
 std::string trim(const std::string& s) {
     const size_t a = s.find_first_not_of(" \t\r\n");
@@ -525,6 +535,26 @@ bool Config::parse(const std::string& text) {
         if (bounded("ext.vision.notice", v, 0.0, 60.0)) e.visionNotice = v;
     t.strings("ext.vision.deny", &e.visionDeny);
 
+    // --- cross-field checks -------------------------------------------------
+    //
+    // Everything above validates one key against its own range, which cannot
+    // see the case where two perfectly legal values contradict each other and
+    // one of them quietly stops mattering. That is the failure this reader
+    // exists to prevent, so it is worth saying - but as a warning, not a
+    // problem: the outcome is defined, the program runs, and refusing to start
+    // over a combination that has always been accepted would lock somebody out
+    // of a config that works today. Each one names what actually happens.
+    if (maxHeight < height)
+        warnings.push_back("'strip.max_height' (" + std::to_string(maxHeight) +
+                           ") is below 'strip.height' (" + std::to_string(height) +
+                           ") - a full-body outfit is never shorter than the bust framing,"
+                           " so max_height does nothing; raise it or lower height");
+    if (bubbleMax < bubbleBase)
+        warnings.push_back("'bubble.max_seconds' (" + plain(bubbleMax) +
+                           ") is below 'bubble.base_seconds' (" + plain(bubbleBase) +
+                           ") - every line is capped at max_seconds, so base_seconds and"
+                           " per_glyph_seconds do nothing");
+
     t.reportUnused();
     problems.insert(problems.end(), t.problems().begin(), t.problems().end());
     return problems.empty();
@@ -562,7 +592,10 @@ greet    = true       # say hello on launch
 # She lives in a full-width, bottom-anchored layer-shell strip. These are its
 # dimensions in logical pixels, at scale 1.0.
 height        = 460   # for a bust framing; a full-body outfit asks for more
-max_height    = 760   # ceiling on what it may ask for
+max_height    = 760   # ceiling on what it may ask for. Must be at or above
+                      # height to mean anything - she is never shorter than the
+                      # bust framing, so a lower ceiling is simply not used, and
+                      # `asuna config check` says so
 margin        = 24    # gap from the anchored screen edge
 bottom_margin = 0     # gap above the bottom screen edge; 0 = flush against it
 pad           = 8     # transparent margin around her inside her box
@@ -583,6 +616,8 @@ gaze_halo = 160       # how far past her outline the cursor is still followed,
 [bubble]
 # How long a line stays up: base + per_glyph x however many characters it is,
 # capped. Counted in codepoints, so Chinese is not charged three times over.
+# max_seconds below base_seconds caps every line at max_seconds and makes the
+# other two do nothing; `asuna config check` says so.
 base_seconds      = 2.0
 per_glyph_seconds = 0.20
 max_seconds       = 9.0

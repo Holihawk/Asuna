@@ -196,7 +196,22 @@ struct Config {
     // Where it came from, empty if there was no file. Reported by `asuna status`
     // so "my config is being ignored" is answerable without guessing.
     std::string source;
+    // Fatal. Anything in here stops the launch: applyConfig (cli.cpp) returns
+    // kUsage on a non-empty list, and `config reload` refuses rather than
+    // half-applying. A value that could not be read or is out of range is one
+    // of these, because the user wrote it on purpose and is watching for it.
     std::vector<std::string> problems;
+    // Not fatal. Settings that parse, are in range, and still do nothing -
+    // because some *other* setting overrides them. The program runs exactly as
+    // it did, and the line is there so the setting that does nothing is not a
+    // silent nothing.
+    //
+    // A separate list rather than more `problems` on purpose. These are
+    // cross-field contradictions that have always been accepted, so making one
+    // fatal would refuse to start a config that works today, over a combination
+    // that has a defined and reasonable outcome. `problems` is for what cannot
+    // be honoured; this is for what is honoured in a way the user did not mean.
+    std::vector<std::string> warnings;
 
     static std::string path();
 

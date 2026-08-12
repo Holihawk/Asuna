@@ -619,10 +619,12 @@ void Shell::applyTunables() {
                              mOpt.bottomMargin);
 }
 
-std::string Shell::reloadConfig(std::vector<std::string>* problems, std::string* note) {
+std::string Shell::reloadConfig(std::vector<std::string>* problems,
+                                std::vector<std::string>* warnings, std::string* note) {
     Config cfg;
     cfg.load(Config::path());
     if (problems) *problems = cfg.problems;
+    if (warnings) *warnings = cfg.warnings;
     if (!cfg.problems.empty()) return "";
 
     // Everything except the five settings state.json owns. Re-seeding those from
