@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "app/argparse.hpp"
 #include "app/config.hpp"
 #include "app/daemon.hpp"
 #include "app/ipc.hpp"
@@ -211,10 +212,19 @@ int applyConfig(ShellOptions* opt) {
 }
 
 // Fills `opt` from argv[from..]. Returns kOk, or kUsage having said why.
+//
+// The numeric flags are read through argparse rather than atoi/atof, and the
+// ranges are the ones config.cpp already enforces on the same settings: a
+// `strip.height` of 40 is refused in the config file, so `--height 40` has no
+// business being accepted here. The difference is what happens next - the
+// config file reports the problem and carries on with the default, because the
+// rest of the file is still worth reading, whereas a flag is the only thing the
+// user just asked for and getting it wrong should stop the launch.
 int parseOptions(int argc, char** argv, int from, ShellOptions* opt, bool* foreground) {
     for (int i = from; i < argc; ++i) {
         const std::string a = argv[i];
         bool missing = false;
+        std::string problem;
         auto next = [&]() -> std::string {
             if (i + 1 >= argc) {
                 missing = true;
@@ -222,24 +232,41 @@ int parseOptions(int argc, char** argv, int from, ShellOptions* opt, bool* foreg
             }
             return argv[++i];
         };
+        // Both readers leave `opt` alone and set `problem` when the text is not
+        // a value, so a rejected flag cannot half-apply. `missing` is checked
+        // after the chain, and wins: "--height needs a value" beats complaining
+        // that the empty string is not a number.
+        auto whole = [&](int lo, int hi, int fallback) -> int {
+            const std::string v = next();
+            int n = fallback;
+            if (!missing) argparse::integerIn(a, v, lo, hi, &n, &problem);
+            return n;
+        };
+        auto fraction = [&](double lo, double hi, double fallback) -> double {
+            const std::string v = next();
+            double n = fallback;
+            if (!missing) argparse::realIn(a, v, lo, hi, &n, &problem);
+            return n;
+        };
         if (a == "--model") opt->model = resolveModelArg(next());
         else if (a == "--layer") opt->layer = next();
         else if (a == "--output") opt->output = next();
         else if (a == "--framing") opt->framing = next();
         else if (a == "--anchor") opt->anchor = next();
-        else if (a == "--height") opt->stripHeight = atoi(next().c_str());
-        else if (a == "--max-height") opt->maxHeight = atoi(next().c_str());
-        else if (a == "--margin") opt->margin = atoi(next().c_str());
-        else if (a == "--bottom") opt->bottomMargin = atoi(next().c_str());
+        else if (a == "--height") opt->stripHeight = whole(80, argparse::kNoMax, opt->stripHeight);
+        else if (a == "--max-height") opt->maxHeight = whole(80, argparse::kNoMax, opt->maxHeight);
+        else if (a == "--margin") opt->margin = whole(0, argparse::kNoMax, opt->margin);
+        else if (a == "--bottom") opt->bottomMargin = whole(0, argparse::kNoMax, opt->bottomMargin);
         else if (a == "--language") opt->language = next();
-        else if (a == "--pad") opt->pad = atoi(next().c_str());
-        else if (a == "--band") opt->bubbleBand = atoi(next().c_str());
-        else if (a == "--side") opt->sideBleed = atof(next().c_str());
-        else if (a == "--gaze-halo") opt->gazeHalo = atoi(next().c_str());
+        else if (a == "--pad") opt->pad = whole(0, argparse::kNoMax, opt->pad);
+        else if (a == "--band") opt->bubbleBand = whole(0, argparse::kNoMax, opt->bubbleBand);
+        else if (a == "--side")
+            opt->sideBleed = static_cast<float>(fraction(0.0, 1.0, opt->sideBleed));
+        else if (a == "--gaze-halo") opt->gazeHalo = whole(0, argparse::kNoMax, opt->gazeHalo);
         else if (a == "--no-greet") opt->greet = false;
-        else if (a == "--scale") opt->scale = atof(next().c_str());
-        else if (a == "--x") opt->x = atof(next().c_str());
-        else if (a == "--fps") opt->fps = atoi(next().c_str());
+        else if (a == "--scale") opt->scale = static_cast<float>(fraction(0.5, 2.5, opt->scale));
+        else if (a == "--x") opt->x = fraction(0.0, argparse::kNoMax, opt->x);
+        else if (a == "--fps") opt->fps = whole(0, argparse::kNoMax, opt->fps);
         else if (a == "--hidden") opt->hidden = 1;
         else if (a == "--show") opt->hidden = 0;
         else if (a == "--no-persist") opt->persist = false;
@@ -254,6 +281,10 @@ int parseOptions(int argc, char** argv, int from, ShellOptions* opt, bool* foreg
         }
         if (missing) {
             fprintf(stderr, "asuna: %s needs a value\n", a.c_str());
+            return kUsage;
+        }
+        if (!problem.empty()) {
+            fprintf(stderr, "asuna: %s\n", problem.c_str());
             return kUsage;
         }
     }
@@ -633,6 +664,26 @@ int cmdConfig(int argc, char** argv, int from) {
 // restarted and not talked to: if it dies, she carries on exactly as she does
 // with it switched off, which is the whole point of it being out of process.
 
+// What to run for the helper: `[ext] command` if the config names one, and the
+// bundled asuna-ext.py if it does not. Both `ext start` and `ext test` need
+// exactly this, and used to carry their own copy of the tokenizer - two copies
+// of a splitter is two places for a quoting rule to be almost the same.
+int extArgv(const Config& cfg, std::vector<std::string>* argv) {
+    if (cfg.ext.command.empty()) {
+        const std::string script = paths::extHelper();
+        if (script.empty())
+            return complain("cannot find asuna-ext.py - set `command` under [ext], or run "
+                            "install.sh so it sits beside the binary");
+        *argv = {"python3", script};
+        return kOk;
+    }
+    std::string problem;
+    if (!argparse::splitCommand(cfg.ext.command, argv, &problem))
+        return complain("[ext] command: " + problem, kUsage);
+    if (argv->empty()) return complain("[ext] command is empty");
+    return kOk;
+}
+
 // The pid in `path`, if a process with that pid is still alive. Unlike the
 // daemon's lock this really is a pid file, because the helper is somebody
 // else's program and cannot be made to hold a lock for us; `kill(pid, 0)` is
@@ -657,27 +708,7 @@ int cmdExtStart(const Config& cfg) {
                         kAlreadyRunning);
 
     std::vector<std::string> argv;
-    if (!cfg.ext.command.empty()) {
-        // Split on spaces only. Enough for `python3 /path/to/thing.py` and for a
-        // wrapper script, and it avoids inventing a shell: a command run through
-        // `sh -c` is a command that can be made to do anything by a config file,
-        // and this one is started by the session.
-        for (size_t i = 0; i < cfg.ext.command.size();) {
-            const size_t sp = cfg.ext.command.find(' ', i);
-            const std::string word = cfg.ext.command.substr(
-                i, sp == std::string::npos ? std::string::npos : sp - i);
-            if (!word.empty()) argv.push_back(word);
-            if (sp == std::string::npos) break;
-            i = sp + 1;
-        }
-    } else {
-        const std::string script = paths::extHelper();
-        if (script.empty())
-            return complain("cannot find asuna-ext.py - set `command` under [ext], or run "
-                            "install.sh so it sits beside the binary");
-        argv = {"python3", script};
-    }
-    if (argv.empty()) return complain("[ext] command is empty");
+    if (const int bad = extArgv(cfg, &argv); bad != kOk) return bad;
 
     const pid_t child = fork();
     if (child < 0) return complain(std::string("fork: ") + strerror(errno));
@@ -767,20 +798,7 @@ int cmdExtTest(const Config& cfg) {
         return complain("she is not running - `asuna start` first", kNotRunning);
 
     std::vector<std::string> argv;
-    if (!cfg.ext.command.empty()) {
-        for (size_t i = 0; i < cfg.ext.command.size();) {
-            const size_t sp = cfg.ext.command.find(' ', i);
-            const std::string word = cfg.ext.command.substr(
-                i, sp == std::string::npos ? std::string::npos : sp - i);
-            if (!word.empty()) argv.push_back(word);
-            if (sp == std::string::npos) break;
-            i = sp + 1;
-        }
-    } else {
-        const std::string script = paths::extHelper();
-        if (script.empty()) return complain("cannot find asuna-ext.py");
-        argv = {"python3", script};
-    }
+    if (const int bad = extArgv(cfg, &argv); bad != kOk) return bad;
     argv.push_back("--test");
 
     const pid_t child = fork();
@@ -1051,7 +1069,20 @@ int dispatch(int argc, char** argv, RunShell runShell) {
         bool haveText = false;
         for (int i = rest; i < argc; ++i) {
             const std::string a = argv[i];
-            if (a == "--for" && i + 1 < argc) args.num("seconds", atof(argv[++i]));
+            if (a == "--for") {
+                // Its own branch rather than `--for && i + 1 < argc`, which fell
+                // through to the catch-all below and reported a missing value as
+                // "say does not take '--for'".
+                if (i + 1 >= argc) return complain("say --for needs a value", kUsage);
+                double seconds = 0;
+                std::string problem;
+                // Positive because it is a duration; the daemon reads 0 as "no
+                // timer at all", which is what leaving --for off already means.
+                if (!argparse::realIn("say --for", argv[++i], 0.001, argparse::kNoMax, &seconds,
+                                      &problem))
+                    return complain(problem, kUsage);
+                args.num("seconds", seconds);
+            }
             else if (a == "--hold") args.boolean("hold", true);
             else if (a == "--append") args.boolean("append", true);
             else if (a == "--release") args.boolean("release", true);
@@ -1083,14 +1114,31 @@ int dispatch(int argc, char** argv, RunShell runShell) {
         if (rest >= argc) return complain("move needs a position", kUsage);
         const std::string where = argv[rest];
         // A number is pixels; anything else is one of the three anchors, and
-        // the daemon is the one that knows how wide the screen is.
-        const bool numeric = where.find_first_not_of("-0123456789.") == std::string::npos;
-        return simple("move", numeric ? ipc::Out().num("x", atof(where.c_str())).done()
-                                      : ipc::Out().str("where", where).done());
+        // the daemon is the one that knows how wide the screen is. Something
+        // made only of digits and dots but not actually a number - "1.2.3", or
+        // a bare "." - is neither, and used to arrive as a partially parsed
+        // 1.2 or a silent 0. No range: the daemon clamps x to the screen it
+        // can see, and only it knows how wide that is.
+        const bool numeric = where.find_first_not_of("-+0123456789.eE") == std::string::npos;
+        if (numeric) {
+            double x = 0;
+            std::string problem;
+            if (!argparse::realAny("move", where, &x, &problem)) return complain(problem, kUsage);
+            return simple("move", ipc::Out().num("x", x).done());
+        }
+        return simple("move", ipc::Out().str("where", where).done());
     }
     if (cmd == "scale") {
         if (rest >= argc) return complain("scale needs a number", kUsage);
-        return simple("scale", ipc::Out().num("value", atof(argv[rest])).done());
+        double value = 0;
+        std::string problem;
+        // Also unranged, and for the same reason: setUserScale clamps to
+        // 0.5-2.5 *and* to what the screen has room for, which is often the
+        // tighter of the two. Refusing 3.0 here would refuse something that
+        // currently works and lands at the ceiling.
+        if (!argparse::realAny("scale", argv[rest], &value, &problem))
+            return complain(problem, kUsage);
+        return simple("scale", ipc::Out().num("value", value).done());
     }
     if (cmd == "layer") {
         if (rest >= argc) return complain("layer needs a name", kUsage);

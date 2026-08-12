@@ -81,11 +81,11 @@ fault of `src/`.
 ## 3. Tests
 
 ```sh
-ctest --test-dir build --output-on-failure     # 4 suites
+ctest --test-dir build --output-on-failure     # 4 suites at Phase 0
 ```
 
 Result: **4/4 passed**, 0.04 s total, in both the existing `build/` and the
-clean build.
+clean build. Phase 1 adds a fifth, `argparse`.
 
 | Suite | Binary sources | Self-reported result |
 | --- | --- | --- |
@@ -93,6 +93,7 @@ clean build.
 | `behaviour` | `behaviour.cpp`, `dialogue.cpp`, `json.cpp` | `all 20 tests passed` |
 | `ipc` | `ipc.cpp`, `json.cpp`, `paths.cpp` | `ipc: all checks passed` (9 groups) |
 | `config` | `config.cpp`, `paths.cpp` | `all config tests passed` (6 groups) |
+| `argparse` | `argparse.cpp` | `all 15 tests passed` — **added in Phase 1** |
 
 `behaviour` must run from the source tree — it reads `data/dialogue.zh.json`
 (CMakeLists.txt:120-121).
@@ -292,7 +293,7 @@ To be run before starting and after finishing each phase:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# tests — expect 4/4
+# tests — expect 4/4 at Phase 0, 5/5 from Phase 1 on
 ctest --test-dir build --output-on-failure
 
 # python — expect exit 0, then clean up

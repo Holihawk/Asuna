@@ -47,6 +47,7 @@ add_executable(asuna
   src/json.cpp
   src/paths.cpp
 
+  src/app/argparse.cpp
   src/app/cli.cpp
   src/app/config.cpp
   src/app/daemon.cpp
@@ -112,10 +113,16 @@ target_link_libraries(asuna-ipc-test PRIVATE PkgConfig::GLIB)
 add_executable(asuna-config-test tests/config_test.cpp src/app/config.cpp src/paths.cpp)
 target_include_directories(asuna-config-test PRIVATE src)
 
+# What the command line is allowed to say. A leaf with no dependencies at all -
+# not even paths - so the boundary and overflow cases cost nothing to run.
+add_executable(asuna-argparse-test tests/argparse_test.cpp src/app/argparse.cpp)
+target_include_directories(asuna-argparse-test PRIVATE src)
+
 enable_testing()
 add_test(NAME motion COMMAND asuna-motion-test)
 add_test(NAME ipc COMMAND asuna-ipc-test)
 add_test(NAME config COMMAND asuna-config-test)
+add_test(NAME argparse COMMAND asuna-argparse-test)
 # Reads the shipped data/dialogue.zh.json, so it runs from the source tree.
 add_test(NAME behaviour COMMAND asuna-behaviour-test
          WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR})

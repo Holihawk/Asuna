@@ -41,6 +41,7 @@ import json
 import os
 import queue
 import random
+import shlex
 import shutil
 import signal
 import socket
@@ -405,7 +406,15 @@ class Helper:
         """What to run to ask for a line, and where to put it."""
         configured = (self.config.get("prompt_command") or "").strip()
         if configured:
-            return configured.split()
+            # shlex, not .split(), so a path with a space in it can be quoted.
+            # The C++ end splits `[ext] command` by the same rules
+            # (app/argparse.cpp), so one config file cannot mean two things
+            # depending on which end reads it. posix=True is the default and is
+            # the half of shlex that matches; nothing here goes near a shell.
+            try:
+                return shlex.split(configured)
+            except ValueError as e:
+                raise IOError("`prompt_command` in the config file: %s" % e) from e
         bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asuna-prompt.py")
         if not os.path.exists(bundled):
             raise IOError("asuna-prompt.py is missing - set `prompt_command` under [ext]")
