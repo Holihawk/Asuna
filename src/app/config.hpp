@@ -211,6 +211,23 @@ struct Config {
     // fatal would refuse to start a config that works today, over a combination
     // that has a defined and reasonable outcome. `problems` is for what cannot
     // be honoured; this is for what is honoured in a way the user did not mean.
+    //
+    // These are statements about *this file*, not about the run. They are
+    // computed from the file alone, before a single command-line flag is looked
+    // at, so both of these hold:
+    //
+    //   asuna start --max-height 1000   still warns about a file whose
+    //                                   max_height is below its height
+    //   asuna start --height 900        does not warn, though the effective
+    //                                   height now exceeds max_height
+    //
+    // That is the intended contract and not an oversight. A flag is one launch;
+    // the file is what gets read every login, and it is the thing the user goes
+    // back and edits. Reporting on the effective options instead would mean
+    // validating after the flags are parsed and tracking which source supplied
+    // each value - a real feature, and a different one. `asuna config check`
+    // reads no flags at all and gives the same answer, which is only coherent
+    // because the answer is about the file.
     std::vector<std::string> warnings;
 
     static std::string path();

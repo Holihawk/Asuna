@@ -13,6 +13,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -157,6 +158,80 @@ long rssKb() {
     long total = 0, resident = 0;
     if (!(f >> total >> resident)) return 0;
     return resident * (sysconf(_SC_PAGESIZE) / 1024);
+}
+
+unsigned long long startTime(pid_t pid) {
+    if (pid <= 0) return 0;
+    std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+    if (!f) return 0;
+    std::string line;
+    std::getline(f, line);
+
+    // Field 2 is the executable name in parentheses, and it may contain both
+    // spaces and parentheses - `(my prog (old))` is a legal comm. Splitting on
+    // whitespace from the left is therefore wrong for every process whose name
+    // has a space in it. The last ')' is the documented way through: everything
+    // after it is fixed-width fields separated by single spaces.
+    const size_t close = line.rfind(')');
+    if (close == std::string::npos) return 0;
+
+    // Field 3 (state) is the first one after that, so field 22 (starttime) is
+    // the 20th token from here.
+    std::istringstream rest(line.substr(close + 1));
+    std::string token;
+    for (int i = 0; i < 20; ++i)
+        if (!(rest >> token)) return 0;
+
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long v = strtoull(token.c_str(), &end, 10);
+    if (end == token.c_str() || *end != '\0' || errno == ERANGE) return 0;
+    // 0 is this function's "cannot tell", and no process has it: pid 1 is
+    // started after boot, so every real starttime is at least a tick or two.
+    return v;
+}
+
+bool writePidFile(const std::string& path, pid_t pid) {
+    // Read before write, and via a rename: `ext status` may be running right
+    // now, and a reader that catches a half-written line sees a truncated pid,
+    // which is a different process. Same argument as State::save.
+    const unsigned long long began = startTime(pid);
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) return false;
+        f << pid << " " << began << "\n";
+        if (!f) return false;
+    }
+    std::error_code ec;
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
+Owner readPidFile(const std::string& path, pid_t* pid) {
+    if (pid) *pid = 0;
+    std::ifstream f(path);
+    pid_t recorded = 0;
+    if (!(f >> recorded) || recorded <= 0) return Owner::kGone;
+    if (pid) *pid = recorded;
+
+    unsigned long long began = 0;
+    const bool haveStart = static_cast<bool>(f >> began);
+
+    const unsigned long long now = startTime(recorded);
+    if (now == 0) return Owner::kGone;   // no such process, whatever the file says
+    if (!haveStart || began == 0) {
+        // Written by a build from before this file had a second field, or by
+        // one that could not read /proc at the time. The old check is all there
+        // is, and it is what every previous version did - so this stays usable
+        // across an upgrade rather than orphaning a helper that is running fine.
+        return Owner::kUnverified;
+    }
+    return began == now ? Owner::kAlive : Owner::kRecycled;
 }
 
 }  // namespace daemon

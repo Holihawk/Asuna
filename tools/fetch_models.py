@@ -67,7 +67,13 @@ def fetch_model(mid, force=False):
         data = get(f"{MODELS}/asuna_{mid}/index.json")
         with open(index_path, "wb") as f:
             f.write(data)
-    index = json.load(open(index_path))
+    # `with`, not json.load(open(...)): this runs once per outfit in a thread
+    # pool, so a handle left to the collector is a handle held for as long as
+    # the pool is busy, and the ResourceWarning that says so only appears under
+    # -W error. Also encoding="utf-8" - index.json is UTF-8 whatever the
+    # machine's locale happens to be.
+    with open(index_path, encoding="utf-8") as f:
+        index = json.load(f)
 
     todo = []
     for rel in asset_paths(index):

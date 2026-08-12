@@ -236,6 +236,12 @@ ipc::Reply Shell::handleCommand(const Json& req) {
         if (!problems.empty()) {
             ipc::Out d;
             d.raw("problems", ipc::Out::array(problems));
+            // The warnings go out with the refusal too. They were collected
+            // before the refusal and they are still true, and holding them back
+            // would mean fixing the typo on line 12, reloading again, and only
+            // then being told that max_height does nothing - two edits for one
+            // sitting, when both facts were known at the same moment.
+            d.raw("warnings", ipc::Out::array(warnings));
             d.str("path", Config::path());
             // Reported as a failure with the detail attached: a reload that
             // silently kept the old settings because line 12 had a typo is the

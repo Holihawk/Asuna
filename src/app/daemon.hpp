@@ -71,5 +71,45 @@ std::string tailLog(const std::string& path, int lines);
 // Resident set size in KiB, or 0 if /proc is not readable.
 long rssKb();
 
+// --- naming a process that is not ours --------------------------------------
+//
+// The extension helper cannot be held to the Lock above: it is somebody else's
+// program - `[ext] command` can name anything - so we cannot make it take a
+// lock on our behalf, and all we have to remember it by is a pid file.
+//
+// A bare pid is not an identity. Pids are reused, so a pid file outliving its
+// process names whatever occupies that number next, and `ext stop` on a stale
+// file would signal a stranger. What makes it an identity is the process's
+// start time: the kernel's own record of when the pid was handed out, so a
+// reused pid is a different start time, always. Pid plus start time is unique
+// for as long as the machine has been up, which is longer than any pid file we
+// write can be meaningful for.
+//
+// pidfd_open was the other candidate and does not fit: a pidfd is a live handle
+// held by a running process, and the thing that has to do the remembering here
+// is a pid file read by a CLI that exits between every command.
+
+// Field 22 of /proc/<pid>/stat - when the process started, in clock ticks since
+// boot. 0 if there is no such process or /proc cannot be read, which callers
+// must treat as "cannot verify" rather than as a value to compare.
+unsigned long long startTime(pid_t pid);
+
+// What a pid file turned out to name.
+enum class Owner {
+    kAlive,       // the process is there and is the one that was recorded
+    kGone,        // no such process; the file is stale and can be removed
+    kRecycled,    // that pid exists but started at a different time: not ours
+    kUnverified,  // the process is there, but written by an older build that
+                  // recorded no start time, so this is the old kill(pid, 0)
+};
+
+// Writes `pid` and its start time to `path`, via a temporary and a rename so a
+// reader can never see half a line. False if it could not be written.
+bool writePidFile(const std::string& path, pid_t pid);
+
+// Reads `path` and says what it names. `pid` gets the recorded pid whatever the
+// verdict, so a caller can report the number in a stale file.
+Owner readPidFile(const std::string& path, pid_t* pid);
+
 }  // namespace daemon
 }  // namespace asuna

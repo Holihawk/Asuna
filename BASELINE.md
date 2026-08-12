@@ -85,8 +85,9 @@ ctest --test-dir build --output-on-failure     # 4 suites at Phase 0
 ```
 
 Result: **4/4 passed**, 0.04 s total, in both the existing `build/` and the
-clean build. Phase 1 adds `argparse` and `cli`, Phase 2 adds `state`, and
-Phase 2.1 adds `json`.
+clean build. Phase 1 adds `argparse` and `cli`, Phase 2 adds `state`,
+Phase 2.1 adds `json`, and Phase 3 adds `daemon` and `ext` — **10/10** from
+there on. `ext` is the first suite that is not C++; see its row below.
 
 | Suite | Binary sources | Self-reported result |
 | --- | --- | --- |
@@ -95,9 +96,11 @@ Phase 2.1 adds `json`.
 | `ipc` | `ipc.cpp`, `json.cpp`, `paths.cpp` | `ipc: all checks passed` (9 groups) |
 | `config` | `config.cpp`, `paths.cpp` | `all config tests passed` (7 groups; `cross-field warnings` added in Phase 2.2) |
 | `argparse` | `argparse.cpp` | `all 16 tests passed` — **added in Phase 1** |
-| `cli` | the built `asuna` binary | `all 44 cli checks passed` — **added in Phase 1**, extended in Phase 2.1; no case reaches a real daemon, so it neither needs her running nor disturbs her if she is |
+| `cli` | the built `asuna` binary | `all 58 cli checks passed` — **added in Phase 1**, extended in Phases 2.1 and 3; no case reaches a real daemon, so it neither needs her running nor disturbs her if she is |
 | `state` | `state.cpp`, `json.cpp`, `paths.cpp` | `all 14 state tests passed` — **added in Phase 2**; runs against a temporary `XDG_STATE_HOME` and refuses to start if that redirect did not take |
 | `json` | `json.cpp` | `all 12 json tests passed` — **added in Phase 2.1**; the number grammar, the string rules and the quote/parse pair |
+| `daemon` | `daemon.cpp` | `all 9 daemon tests passed` — **added in Phase 3**; pid-file identity, including a recycled pid and a file from an older build |
+| `ext` | `tools/asuna-ext.py` via `python3` | `all 14 ext tests passed` — **added in Phase 3**; provider failover with `Provider.request` replaced by canned responses, so no network and no API key. Skipped if `python3` is absent, which would also mean the helper could not run |
 
 `behaviour` must run from the source tree — it reads `data/dialogue.zh.json`
 (CMakeLists.txt:120-121).
@@ -185,16 +188,18 @@ Exit codes (`src/app/cli.hpp:26-29`): `kOk=0`, `kError=1`, `kUsage=2`,
 "strip_height":713,"asleep":false,"config":"…/config.toml"}}
 ```
 
-**Recorded discrepancy — `--json` changes the exit code.**
-`asuna ext status` exits `3` when the helper is not running, but
-`asuna --json ext status` exits `0` for the same state. `cli.cpp:885` returns
-`kOk` early in JSON mode and never reaches the
-`return pid > 0 && subscribers > 0 ? kOk : kNotRunning;` at `cli.cpp:894`.
-The JSON body cannot substitute: it carries `subscribers`, but **not** the
-helper pid, which is read locally via `extPid()`. So a `--json` caller cannot
-determine helper liveness from either the exit code or the payload.
+**Recorded discrepancy — `--json` changed the exit code. Fixed in Phase 3.**
+`asuna ext status` exited `3` when the helper was not running, but
+`asuna --json ext status` exited `0` for the same state: JSON mode returned
+`kOk` early and never reached the combined verdict. The payload could not
+substitute, because it carries `subscribers` but not the helper pid — the pid
+file is the client's, not the daemon's — so a `--json` caller could learn
+nothing from either half.
 
-This is recorded as existing behaviour, not fixed here. It belongs to Phase 3.
+Both forms now return `pid > 0 && subscribers > 0 ? kOk : kNotRunning`. The
+payload is still the raw daemon reply, unchanged, because README's contract for
+`--json` is that it prints exactly that; the exit code is where the client's
+view of the pid file and the daemon's view of its subscribers are combined.
 
 ### Live daemon file layout
 
@@ -303,7 +308,8 @@ To be run before starting and after finishing each phase:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# tests — 4/4 at Phase 0, 6/6 from Phase 1, 7/7 from Phase 2, 8/8 from Phase 2.1
+# tests — 4/4 at Phase 0, 6/6 from Phase 1, 7/7 from Phase 2, 8/8 from Phase 2.1,
+#         10/10 from Phase 3
 ctest --test-dir build --output-on-failure
 
 # python — expect exit 0, then clean up

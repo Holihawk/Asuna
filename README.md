@@ -812,7 +812,7 @@ clamps to *that*.
 ## Tests
 
 ```sh
-ctest --test-dir build          # 4 suites, no compositor, no GPU
+ctest --test-dir build          # 10 suites, no compositor, no GPU, no network
 ```
 
 | | |
@@ -821,6 +821,16 @@ ctest --test-dir build          # 4 suites, no compositor, no GPU
 | `behaviour` | the personality: scheduling on a timescale of minutes, and the dialogue file |
 | `ipc` | the control protocol over a real socket, with a client on a second thread — including a subscription: the reply still comes first, events arrive one per line, an ordinary caller alongside it is unaffected, and the daemon is told when the subscriber goes |
 | `config` | the reader, and every way of getting the file wrong — including provider groups, the priority list, and triple-quoted prompts |
+| `argparse` | what the command line is allowed to say: malformed numbers, boundaries, overflow, and the quoting grammar shared with the Python end |
+| `json` | the shared reader and writer — the RFC 8259 number grammar, control characters in strings, and that everything `quote` writes parses back to itself |
+| `state` | what she remembers between runs, against a temporary `XDG_STATE_HOME` it refuses to run without |
+| `daemon` | whether a pid file still names the process that wrote it, which is what stands between `ext stop` and a stranger who inherited the number |
+| `cli` | the real binary, one command at a time: which bound each flag is given, and what `config check` says in each shape. Nothing here starts a daemon or touches a running one |
+| `ext` | the helper's provider failover, offline: an empty stream, a dead endpoint, an HTTP status, a stream that dies mid-answer, and cancellation — which is not the endpoint's fault and must not be treated as one |
+
+`ext` runs `tools/asuna-ext.py` with `Provider.request` replaced by canned responses, so it
+needs no network and no API key. It is skipped if `python3` is missing, which would also
+mean the extension helper could not run at all.
 
 The config suite also parses what `asuna config init` writes and asserts it produces a
 `Config` identical to a default-constructed one — which is what stops the documented

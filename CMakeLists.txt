@@ -125,6 +125,13 @@ target_include_directories(asuna-argparse-test PRIVATE src)
 add_executable(asuna-json-test tests/json_test.cpp src/json.cpp)
 target_include_directories(asuna-json-test PRIVATE src)
 
+# Whether a pid file still names the process that wrote it - the check that
+# stands between `ext stop` and a stranger who inherited the number. GLib for
+# the log filter that shares this file; no GTK, no GL, no socket.
+add_executable(asuna-daemon-test tests/daemon_test.cpp src/app/daemon.cpp)
+target_include_directories(asuna-daemon-test PRIVATE src)
+target_link_libraries(asuna-daemon-test PRIVATE PkgConfig::GLIB)
+
 # What she remembers between runs. No GTK and no GL: the state file is JSON and
 # a path, and the suite points XDG_STATE_HOME at a temporary directory before
 # the first call, so it cannot see a real state.json let alone write one.
@@ -139,6 +146,7 @@ add_test(NAME config COMMAND asuna-config-test)
 add_test(NAME argparse COMMAND asuna-argparse-test)
 add_test(NAME json COMMAND asuna-json-test)
 add_test(NAME state COMMAND asuna-state-test)
+add_test(NAME daemon COMMAND asuna-daemon-test)
 # The wiring rather than the parsers: which bound each flag is actually given.
 # Runs the real binary, and every case in it is decided before the control
 # socket is touched, so it neither needs her running nor disturbs her if she is.
@@ -146,6 +154,16 @@ add_test(NAME cli COMMAND ${CMAKE_CURRENT_LIST_DIR}/tests/cli_test.sh $<TARGET_F
 # Reads the shipped data/dialogue.zh.json, so it runs from the source tree.
 add_test(NAME behaviour COMMAND asuna-behaviour-test
          WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR})
+# The extension helper's failover, offline. python3 is not an added dependency:
+# tools/asuna-ext.py is what `asuna ext start` runs, so a tree that cannot run
+# this suite cannot run the feature it tests either. No network and no daemon -
+# Provider.request is replaced with canned responses.
+find_program(PYTHON3 python3)
+if(PYTHON3)
+  add_test(NAME ext COMMAND ${PYTHON3} ${CMAKE_CURRENT_LIST_DIR}/tests/ext_test.py)
+else()
+  message(WARNING "python3 not found - skipping the `ext` test suite.")
+endif()
 
 # ---------------------------------------------------------------------------
 # Phase 0 spike / regression harness: renders offscreen, no compositor.

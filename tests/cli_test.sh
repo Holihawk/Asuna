@@ -37,7 +37,12 @@ checks=0
 
 # An empty session directory: no control socket, no lock. See the note above.
 NOWHERE=$(mktemp -d "${TMPDIR:-/tmp}/asuna-cli-test-XXXXXX") || exit 1
-trap 'rm -rf "$NOWHERE"' EXIT INT TERM
+# And a config directory of our own. Config::path() is built from
+# XDG_CONFIG_HOME, so `config check` can be pointed at a file this script wrote
+# without going anywhere near the one the user actually runs on.
+CFGROOT=$(mktemp -d "${TMPDIR:-/tmp}/asuna-cli-cfg-XXXXXX") || exit 1
+trap 'rm -rf "$NOWHERE" "$CFGROOT"' EXIT INT TERM
+mkdir -p "$CFGROOT/asuna"
 # kNotRunning, from src/app/cli.hpp.
 ABSENT=3
 
@@ -83,6 +88,25 @@ run_absent() {
     output=$(XDG_RUNTIME_DIR="$NOWHERE" "$ASUNA" "$@" 2>&1)
     status=$?
     verdict "$@"
+}
+
+# Against the config file this script wrote, not the user's.
+run_cfg() {
+    want_status="$1"
+    want_text="$2"
+    shift 2
+    checks=$((checks + 1))
+    output=$(XDG_CONFIG_HOME="$CFGROOT" "$ASUNA" "$@" 2>&1)
+    status=$?
+    verdict "$@"
+}
+
+# Replaces the test config file with its arguments, one line each.
+write_config() {
+    : > "$CFGROOT/asuna/config.toml"
+    for line in "$@"; do
+        printf '%s\n' "$line" >> "$CFGROOT/asuna/config.toml"
+    done
 }
 
 # --- malformed values are refused, and say so ------------------------------
@@ -164,6 +188,44 @@ run_absent "$ABSENT" "not running" hide
 run_absent 2 "needs a number" scale nope
 run_absent 2 "needs a number" move 1.2.3
 run_absent 2 "more than 0"    say hi --for 0
+
+# --- `config check`, and what it says in each shape --------------------------
+# Reads a file this script wrote, via XDG_CONFIG_HOME. Nothing here starts a
+# daemon or looks at the user's own config.
+
+echo "config check"
+write_config '[strip]' 'height = 460'
+run_cfg 0 "is fine" config check
+# A file that parses and contains a setting another setting overrides. Non-fatal
+# on purpose - `config check` exiting non-zero here would fail a config that
+# runs perfectly well, which is the whole reason this is not a `problem`.
+write_config '[strip]' 'height = 900'
+run_cfg 0 "do nothing"  config check
+run_cfg 0 "max_height"  config check
+# A real problem still fails, and still names itself.
+write_config '[strip]' 'height = "tall"'
+run_cfg 1 "should be a number" config check
+# No file at all is a valid state, not an error.
+rm -f "$CFGROOT/asuna/config.toml"
+run_cfg 0 "all defaults" config check
+
+echo "config check --json"
+# Human text where a machine-readable reply was asked for is the bug this
+# covers: every one of these used to print the same prose as the runs above.
+write_config '[strip]' 'height = 460'
+run_cfg 0 '"ok":true'      --json config check
+run_cfg 0 '"warnings":[]'  --json config check
+run_cfg 0 '"exists":true'  --json config check
+write_config '[strip]' 'height = 900'
+run_cfg 0 '"ok":true'      --json config check
+run_cfg 0 "max_height"     --json config check
+# Problems and warnings arrive together, so one edit can fix both.
+write_config '[strip]' 'height = 900' 'nonsense = 1'
+run_cfg 1 '"ok":false'     --json config check
+run_cfg 1 '"problems":["' --json config check
+run_cfg 1 "max_height"     --json config check
+rm -f "$CFGROOT/asuna/config.toml"
+run_cfg 0 '"exists":false' --json config check
 
 if [ "$failures" -gt 0 ]; then
     printf '\n%s of %s checks failed\n' "$failures" "$checks"

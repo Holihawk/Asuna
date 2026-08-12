@@ -614,6 +614,27 @@ int cmdConfig(int argc, char** argv, int from) {
     if (verb == "check") {
         Config cfg;
         cfg.load(path);
+        // The only verdict here that is not the daemon's, so the only one that
+        // has to build its own reply line. Same envelope as every other --json
+        // answer, because `asuna --json <anything> | jq .ok` should mean one
+        // thing: `ok` is false exactly when the exit status is non-zero, and
+        // `warnings` is always present, empty or not, so a reader never has to
+        // tell "no warnings" from "this build had none to give".
+        if (gJson) {
+            ipc::Out d;
+            d.str("path", path);
+            d.boolean("exists", !cfg.source.empty());
+            d.raw("problems", ipc::Out::array(cfg.problems));
+            d.raw("warnings", ipc::Out::array(cfg.warnings));
+            const std::string body = d.done();
+            if (cfg.problems.empty()) {
+                printf("%s\n", ipc::ok(body).c_str());
+                return kOk;
+            }
+            printf("%s\n", ipc::fail(std::to_string(cfg.problems.size()) +
+                                     " problem(s) in " + path, body).c_str());
+            return kError;
+        }
         if (cfg.source.empty()) {
             printf("asuna: no config file at %s - all defaults, which is valid\n",
                    path.c_str());
@@ -666,10 +687,15 @@ int cmdConfig(int argc, char** argv, int from) {
         Json d;
         if (!send("config", "", &d, &status)) {
             // The daemon sent the problem list along with the refusal, so the
-            // reason is already here rather than a `config check` away.
+            // reason is already here rather than a `config check` away. The
+            // warnings come with it for the same reason - both were known at
+            // the same moment, and one edit should be able to fix both.
             const Json& problems = d["problems"];
             for (size_t i = 0; i < problems.size(); ++i)
                 fprintf(stderr, "  %s\n", problems[i].asString().c_str());
+            const Json& warnings = d["warnings"];
+            for (size_t i = 0; i < warnings.size(); ++i)
+                fprintf(stderr, "  %s\n", warnings[i].asString().c_str());
             return status;
         }
         if (!gJson) {
@@ -719,17 +745,34 @@ int extArgv(const Config& cfg, std::vector<std::string>* argv) {
     return kOk;
 }
 
-// The pid in `path`, if a process with that pid is still alive. Unlike the
-// daemon's lock this really is a pid file, because the helper is somebody
-// else's program and cannot be made to hold a lock for us; `kill(pid, 0)` is
-// the best check available, and a recycled pid is a risk worth naming rather
-// than pretending away - it can only ever mean `ext stop` signals the wrong
-// process, and only after a wrap-around inside one session.
-pid_t extPid() {
-    std::ifstream f(paths::extPidPath());
+// The helper's pid, if the pid file still names the helper.
+//
+// Unlike the daemon's lock this really is a pid file, because the helper is
+// somebody else's program and cannot be made to hold a lock for us. What makes
+// the file trustworthy is the start time recorded beside the pid: a reused pid
+// has a different one, so `ext stop` cannot signal a stranger that happened to
+// inherit the number. See daemon::readPidFile.
+//
+// A recycled or stale file is said out loud rather than passed off as "not
+// running", because those are different things to whoever is reading: one means
+// the helper stopped, the other means it stopped *and* something else is now
+// wearing its number.
+pid_t extPid(bool quiet = false) {
     pid_t pid = 0;
-    if (!(f >> pid) || pid <= 0) return 0;
-    return kill(pid, 0) == 0 ? pid : 0;
+    switch (daemon::readPidFile(paths::extPidPath(), &pid)) {
+        case daemon::Owner::kAlive:
+        case daemon::Owner::kUnverified:
+            return pid;
+        case daemon::Owner::kRecycled:
+            if (!quiet)
+                fprintf(stderr, "asuna: %s names pid %d, which is now a different process -"
+                                " the helper is gone\n",
+                        paths::extPidPath().c_str(), static_cast<int>(pid));
+            return 0;
+        case daemon::Owner::kGone:
+            return 0;
+    }
+    return 0;
 }
 
 int cmdExtStart(const Config& cfg) {
@@ -755,15 +798,18 @@ int cmdExtStart(const Config& cfg) {
         const pid_t grandchild = fork();
         if (grandchild < 0) _exit(1);
         if (grandchild > 0) {
-            // The middle process is the one that knows the surviving pid. In
-            // its own scope, because _exit() below does not run destructors and
-            // therefore does not flush a stream - which left a pid file of
-            // exactly zero bytes and an `ext status` that could see the helper
-            // on the socket but not in the process table.
-            {
-                std::ofstream f(paths::extPidPath(), std::ios::trunc);
-                f << grandchild << "\n";
-            }
+            // The middle process is the one that knows the surviving pid. It
+            // also records when that pid started, which is what stops the file
+            // from naming a stranger later; the write goes through a temporary
+            // and a rename, so `ext status` running at this instant sees either
+            // the old file or the new one and never half a line.
+            //
+            // daemon::writePidFile finishes before _exit, which does not run
+            // destructors and therefore does not flush a stream - a plain
+            // ofstream here once left a pid file of exactly zero bytes and an
+            // `ext status` that could see the helper on the socket but not in
+            // the process table.
+            daemon::writePidFile(paths::extPidPath(), grandchild);
             _exit(0);
         }
         std::string error;
@@ -803,16 +849,27 @@ int cmdExtStart(const Config& cfg) {
 }
 
 int cmdExtStop() {
+    // Loud here of all places: this is the verb that sends the signal, so a pid
+    // file naming somebody else is the exact thing the caller needs told before
+    // being reassured that nothing was running.
     const pid_t pid = extPid();
     std::error_code ec;
     if (pid <= 0) {
         fs::remove(paths::extPidPath(), ec);
         return complain("the helper is not running", kOk);
     }
+    // Remembered before the signal, and checked again before escalating: the
+    // helper can exit inside the five seconds below and the pid be handed to
+    // something else in the same window, and SIGKILL is not a signal to send on
+    // a guess. `alive` is "still the process we just asked to stop", not "some
+    // process has this number".
+    const unsigned long long began = daemon::startTime(pid);
+    const auto alive = [&] { return daemon::startTime(pid) == began && began != 0; };
+
     kill(pid, SIGTERM);
     const int deadline = nowMs() + kTermTimeoutMs;
-    while (nowMs() < deadline && kill(pid, 0) == 0) usleep(50 * 1000);
-    if (kill(pid, 0) == 0) {
+    while (nowMs() < deadline && alive()) usleep(50 * 1000);
+    if (alive()) {
         fprintf(stderr, "asuna: it ignored SIGTERM; killing pid %d\n", pid);
         kill(pid, SIGKILL);
     }
@@ -863,7 +920,10 @@ int cmdExt(int argc, char** argv, int from) {
             return kUsage;
         }
         if (verb == "test") return cmdExtTest(cfg);
-        if (verb == "restart" && extPid() > 0) cmdExtStop();
+        // Quiet: cmdExtStart says the same thing a line later if the pid file
+        // turns out to name a stranger, and hearing it twice from one command
+        // reads like it happened twice.
+        if (verb == "restart" && extPid(true) > 0) cmdExtStop();
         return cmdExtStart(cfg);
     }
     if (verb == "stop") return cmdExtStop();
@@ -935,8 +995,18 @@ int cmdExt(int argc, char** argv, int from) {
         if (status == kNotRunning) printf("asuna: not running\n");
         return status;
     }
-    if (gJson) return kOk;
     const int subscribers = static_cast<int>(d["subscribers"].asNumber());
+    if (gJson) {
+        // The raw reply is already on stdout - README: "--json on anything
+        // prints the raw reply" - so nothing further is printed here. The exit
+        // code is another matter: it used to be kOk whatever the helper was
+        // doing, which left a --json caller unable to learn anything from
+        // either half. The payload is the daemon's view and has no pid in it,
+        // because the pid file is this end's, so the exit code is the only
+        // place the two views are combined. Same verdict as the text form
+        // below, which is the whole point.
+        return pid > 0 && subscribers > 0 ? kOk : kNotRunning;
+    }
     if (pid > 0 && subscribers > 0) printf("asuna: helper running (pid %d)\n", pid);
     else if (pid > 0) printf("asuna: helper running (pid %d) but not connected to her\n", pid);
     else if (subscribers > 0) printf("asuna: something is subscribed, but it is not ours\n");

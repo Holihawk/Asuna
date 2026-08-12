@@ -36,6 +36,7 @@ takes the sentence you were typing somewhere else with it.
 
 import argparse
 import base64
+import http.client
 import io
 import json
 import os
@@ -49,6 +50,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 
@@ -188,18 +190,30 @@ class Provider:
 
 
 def describe(error):
-    """An HTTP failure in a form worth putting in front of a person."""
+    """A failed attempt in a form worth putting in front of a person.
+
+    The three kinds arrive here as one exception type each, and they mean
+    different things to whoever reads the log: an HTTP status is the endpoint
+    answering and objecting - usually a key or a quota, and it says which if it
+    can be asked - while a URLError with no status never reached one, and
+    anything else is a malformed reply.
+    """
     if isinstance(error, urllib.error.HTTPError):
         detail = ""
+        # Reading the body is a courtesy, so nothing it can do is worth losing
+        # the status code over. Narrow rather than bare, though: json.loads
+        # raises ValueError, a body that is a JSON string rather than an object
+        # makes `.get` an AttributeError, and the read itself can fail at the
+        # socket. A NameError in this block is a bug and should surface as one.
         try:
             body = json.loads(error.read().decode("utf-8", "replace"))
             detail = body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
-        except Exception:
+        except (ValueError, AttributeError, OSError, http.client.HTTPException):
             pass
         return "HTTP %d%s" % (error.code, ": " + detail if detail else "")
     if isinstance(error, urllib.error.URLError):
-        return str(error.reason)
-    return str(error)
+        return "did not connect: %s" % (error.reason,)
+    return "unreadable reply: %s" % (error,)
 
 
 class Chat:
@@ -246,6 +260,7 @@ class Chat:
     def _stream(self, provider, messages, cancelled):
         body = self._body(messages, True)
         body["model"] = provider.model
+        unreadable = 0
         with provider.request(body) as response:
             for raw in response:
                 if cancelled.is_set():
@@ -255,14 +270,23 @@ class Chat:
                     continue
                 payload = line[5:].strip()
                 if payload == "[DONE]":
-                    return
+                    break
                 try:
                     delta = json.loads(payload)["choices"][0]["delta"]
                 except (ValueError, KeyError, IndexError):
+                    # One malformed event is not worth abandoning an answer
+                    # that is otherwise arriving, so it is skipped - but
+                    # silently skipping every one of them is how a provider
+                    # that speaks a different dialect looks like a provider
+                    # that is merely quiet. Counted, and said once at the end.
+                    unreadable += 1
                     continue
                 piece = delta.get("content")
                 if piece:
                     yield piece
+        if unreadable:
+            log("%s: skipped %d unreadable event(s) in the stream"
+                % (provider.name, unreadable))
 
     def ask(self, text, cancelled, image=None, remember=True):
         """Streams an answer, yielding it in pieces. Raises if none answered."""
@@ -279,21 +303,46 @@ class Chat:
         ready = [p for p in self.providers if p.ready()]
         # All of them cooling down means the cooldowns have stopped being
         # information. Try everything rather than refuse.
+        refusals = []
         for provider in ready or self.providers:
             answer = []
             try:
                 stream = self._stream(provider, messages, cancelled)
                 first = next(stream, None)
-            except (urllib.error.URLError, OSError, ValueError) as e:
+            except (urllib.error.URLError, OSError, ValueError,
+                    http.client.HTTPException) as e:
+                # describe() separates the three that arrive here: an HTTP
+                # status with the endpoint's own message where there is one, a
+                # connection failure with the reason, and anything else as
+                # itself.
                 provider.blocked_until = time.time() + COOLDOWN
+                refusals.append("%s: %s" % (provider.name, describe(e)))
                 log("%s did not answer (%s), trying the next" % (provider.name, describe(e)))
                 continue
+
+            if first is None:
+                # HTTP 200 and not one token in it - an immediate [DONE], an
+                # empty choices list, a stream of deltas that were all metadata.
+                # This used to count as a successful answer, so the fallback
+                # provider was never tried and an empty assistant turn went into
+                # the history, where it stayed for the rest of the conversation.
+                #
+                # Cancellation looks identical from here and is not the
+                # provider's fault, so it is checked first and simply stops:
+                # she was told to be quiet, and blaming the endpoint for that
+                # would cool down a provider that did nothing wrong.
+                if cancelled.is_set():
+                    return
+                provider.blocked_until = time.time() + COOLDOWN
+                refusals.append("%s: answered with nothing" % provider.name)
+                log("%s answered with nothing, trying the next" % provider.name)
+                continue
+
             provider.blocked_until = 0.0
             if len(self.providers) > 1:
                 log("answering through", provider.name)
-            if first is not None:
-                answer.append(first)
-                yield first
+            answer.append(first)
+            yield first
             for piece in stream:
                 answer.append(piece)
                 yield piece
@@ -305,6 +354,10 @@ class Chat:
                 self.history.append({"role": "assistant", "content": "".join(answer)})
                 del self.history[: max(0, len(self.history) - 2 * self.turns)]
             return
+        # Which provider failed and how, rather than one word for every cause.
+        # This is what ends up in ext.log after "could not answer".
+        if refusals:
+            raise IOError("no provider answered - " + "; ".join(refusals))
         raise IOError("no provider answered")
 
     def probe(self, provider):
@@ -319,7 +372,8 @@ class Chat:
             with provider.request(body, stream=False) as response:
                 json.load(response)
             return True, "", time.time() - started
-        except (urllib.error.URLError, OSError, ValueError) as e:
+        except (urllib.error.URLError, OSError, ValueError,
+                http.client.HTTPException) as e:
             return False, describe(e), time.time() - started
 
 
@@ -721,12 +775,12 @@ class Helper:
                     log("she has gone")
                     break
                 elif name == "chat":
-                    self.converse(event.get("text", ""))
+                    self.guarded(self.converse, event.get("text", ""))
                 elif name == "cancel":
                     self.cancelled.set()
                 elif name == "config":
                     log("config reloaded")
-                    self.load_config()
+                    self.guarded(self.load_config)
                 elif name == "sleep" and event.get("asleep"):
                     # Asleep is not a state to wake her out of with an opinion
                     # about your screen. The next glance waits for her.
@@ -734,8 +788,30 @@ class Helper:
                 continue
 
             if self.next_glance and time.time() >= self.next_glance:
-                self.glance()
+                self.guarded(self.glance)
                 self.schedule_glance()
+
+    def guarded(self, work, *args):
+        """Runs one piece of work, and survives it going wrong.
+
+        The one broad handler in this file, and it is here on purpose. Every
+        other `except` names what it expects, because a handler that catches
+        everything is a handler that hides the bug you needed to see. This one
+        is the outer boundary: below it are an HTTP client, a JSON decoder, a
+        subprocess and a socket, and an exception nobody predicted from any of
+        them would otherwise unwind straight out of run() and end the helper.
+
+        A helper that dies takes chat and glances with it until somebody
+        notices and runs `ext start` again - and nothing notices, because it is
+        deliberately unsupervised. Losing one answer is the smaller failure. The
+        traceback goes to ext.log in full, so this stays a place bugs are
+        reported rather than a place they are buried.
+        """
+        try:
+            work(*args)
+        except Exception:   # noqa: BLE001 - the supervisory boundary; see above
+            log("unhandled while running %s:\n%s"
+                % (getattr(work, "__name__", work), traceback.format_exc().rstrip()))
 
     def stop(self, *_):
         """SIGTERM, from `asuna ext stop`.
