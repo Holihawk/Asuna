@@ -231,18 +231,22 @@ lines; `tools/*.py` 4 files / 1,452 lines).
 
 Recorded here so they are not mistaken for damage done by a later phase.
 
-1. **There is no version control.** No `.git`, no `.gitignore`. Phase 0's own
-   task "check for unrelated local changes before each implementation phase"
-   cannot be performed, and Phases 5-6 (moving ~4,000 lines across new
-   directories) would have no revert path. This is the single largest risk to
-   the plan.
+1. ~~**There is no version control.**~~ **Resolved during Phase 0.** A private
+   repository was initialised by the maintainer: one `Initial commit` (`e2198be`),
+   with `/build/`, `/models/`, `__pycache__`, `*.pyc`, `*.pyo` ignored.
+   `third_party/` is **tracked on purpose** (108 files) — it carries local
+   patches and is not reproducible by a fetch. Each phase is reviewed and
+   committed by hand, so no phase should commit on its own.
 
-2. **`tools/vendor.sh` does not exist.** It is the first line of the README's
-   build instructions and is referenced again under "Requirements". `tools/`
-   holds only `asuna-ext.py`, `asuna-prompt.py`, `fetch_models.py`,
-   `pam2png.py`. The build works because `third_party/live2d-v2` is already
-   vendored, so this is a documentation break, not a build break — but the
-   documented build is not reproducible from a clean checkout.
+2. ~~**`tools/vendor.sh` does not exist.**~~ **Resolved during Phase 0.** It
+   never existed; the vendoring was done by hand and the README described it
+   aspirationally. The README was corrected in three places: the "Requirements"
+   note, the "Build and install" block, and the licensing consequences. Two
+   related statements were wrong and are also fixed — the build no longer opens
+   with an uninstallable step, and the claim that `third_party/live2d-v2/`
+   "need not be committed" is replaced with what is actually true: it is
+   committed deliberately, because `PATCHES.md` holds nine local patches that a
+   plain re-fetch would silently revert.
 
 3. **`improve.md`'s GLFW note does not apply here.** It says the CMake warning
    "only indicates that the optional render test is skipped". On this machine

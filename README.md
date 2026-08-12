@@ -115,18 +115,26 @@ window — cairo for the one region it hands the compositor), plus
 identically with none of it installed.
 
 The model assets are not in this repository. `tools/fetch_models.py --all` downloads all 42
-outfits (39 MB) from the source CDN; `tools/vendor.sh` fetches and prunes the runtime.
+outfits (39 MB) from the source CDN. The Live2D runtime is the other way round: it *is* in
+the repository, under `third_party/live2d-v2/`, vendored by hand and carrying nine local
+patches — so there is nothing to fetch and no script to run. What was changed, and why, is
+in `third_party/live2d-v2/PATCHES.md`.
 
 ---
 
 ## Build and install
 
 ```sh
-tools/vendor.sh                 # third_party/live2d-v2 (Common/ Glad/ V2/ only)
 tools/fetch_models.py --all     # models/asuna_NN/, 39 MB
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./install.sh                    # into ~/.local; --prefix, --link, --uninstall
 ```
+
+`third_party/live2d-v2/` is committed, so there is no vendoring step: the runtime is
+already pruned to `Common/`, `Glad/` and `V2/`, and already patched. Re-vendoring from
+upstream is a manual job — pin `PINNED-COMMIT`, copy those three directories, then re-apply
+every patch in `PATCHES.md`. A plain re-fetch silently reverts nine fixes, two of which are
+visible rendering bugs.
 
 `install.sh` puts the binary in `<prefix>/bin` and the data in `<prefix>/share/asuna/`.
 That layout is not arbitrary: both the model search and the dialogue search walk up from
@@ -868,10 +876,15 @@ compositor but cannot be reached without a pointer this machine cannot synthesis
 Consequences, baked into the build:
 
 - Vendor **only** `Common/`, `Glad/` and `V2/`. **Never `V3/`**, which carries the
-  proprietary prebuilt Cubism Core binaries. `tools/vendor.sh` prunes it.
-- **Do not publish this repository with `models/` or `third_party/live2d-v2/` in it.** Both
-  are reproducible from the scripts in `tools/`, and neither needs to be committed.
-- If it ever goes public: this code only, plus the fetch scripts.
+  proprietary prebuilt Cubism Core binaries. The vendored tree is pruned to those three by
+  hand; nothing enforces it automatically.
+- **Do not publish this repository with `models/` or `third_party/live2d-v2/` in it.**
+  `models/` is git-ignored and re-fetchable, so it takes care of itself.
+  `third_party/live2d-v2/` **is committed**, deliberately — it is not reproducible by a
+  plain fetch, because it carries the local patches in `PATCHES.md`. That is fine while this
+  repository stays private, and it is the thing to remove first if it ever does not.
+- If it ever goes public: this code only, plus `tools/fetch_models.py` — with the vendored
+  runtime stripped and rebuilt from upstream plus `PATCHES.md`.
 
 ---
 
