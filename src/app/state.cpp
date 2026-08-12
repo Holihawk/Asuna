@@ -21,8 +21,20 @@ fs::path stateDir() { return paths::stateDir(); }
 std::string State::path() { return (stateDir() / "state.json").string(); }
 
 bool State::load() {
-    std::ifstream f(path());
-    if (!f) return true;   // first run
+    const std::string file = path();
+    std::ifstream f(file);
+    if (!f) {
+        // Not every failure to open is a first run. A file that is there but
+        // unreadable - wrong mode, an I/O error, a directory where a file
+        // should be - looks identical from the stream alone, and treating it as
+        // "she has never been started" is how a position and an outfit revert
+        // on every login with nothing said about it.
+        std::error_code ec;
+        if (!fs::exists(file, ec) && !ec) return true;   // genuinely absent
+        fprintf(stderr, "asuna: ignoring %s - %s\n", file.c_str(),
+                ec ? ec.message().c_str() : "cannot be read");
+        return true;
+    }
 
     // Parsed rather than scanned. The scan this replaces looked for `"x"`
     // anywhere in the file, which meant a model path containing the text of
@@ -38,7 +50,7 @@ bool State::load() {
         // to start because of it would be a pet held hostage by its own
         // scratchpad. Said out loud, though - the alternative is a position and
         // an outfit that silently revert on every login.
-        fprintf(stderr, "asuna: ignoring %s - %s\n", path().c_str(),
+        fprintf(stderr, "asuna: ignoring %s - %s\n", file.c_str(),
                 reason.empty() ? "not a JSON object" : reason.c_str());
         return true;
     }
@@ -48,11 +60,16 @@ bool State::load() {
     // state beats none. Present-but-wrong is worth a line though - it is the
     // one case that means somebody edited this file and got it wrong, and a
     // setting that quietly does nothing is the thing that wastes an evening.
+    //
+    // `has` rather than a null check: `operator[]` answers a missing key and an
+    // explicit `"output": null` with the same Null, and those are not the same
+    // event. Nothing here ever writes null, so a null is a hand edit, and it is
+    // named like any other member that was written wrong.
     std::string wrong;
     const auto shaped = [&](const char* key, Json::Type want) {
-        const Json::Type got = doc[key].type();
-        if (got == want) return true;
-        if (got != Json::Type::Null) wrong += wrong.empty() ? key : std::string(", ") + key;
+        if (!doc.has(key)) return false;   // never written: the default stands
+        if (doc[key].type() == want) return true;
+        wrong += wrong.empty() ? key : std::string(", ") + key;
         return false;
     };
 
@@ -64,7 +81,7 @@ bool State::load() {
     if (shaped("hidden", Json::Type::Bool)) hidden = doc["hidden"].asBool() ? 1 : 0;
 
     if (!wrong.empty())
-        fprintf(stderr, "asuna: %s: ignoring %s - wrong type\n", path().c_str(), wrong.c_str());
+        fprintf(stderr, "asuna: %s: ignoring %s - wrong type\n", file.c_str(), wrong.c_str());
     return true;
 }
 

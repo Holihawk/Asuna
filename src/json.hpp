@@ -46,8 +46,22 @@ public:
     const std::string& keyAt(size_t i) const;              // object member name
     const Json& valueAt(size_t i) const;
 
+    // Whether the object carries this member at all. Not the same question as
+    // whether the member is null, and the difference is the only way to tell a
+    // key nobody wrote from a key somebody wrote wrong: `operator[]` answers
+    // both with a Null, so a caller that wants to complain about `"x": null`
+    // while staying quiet about a missing `x` has to ask this first.
+    bool has(const std::string& key) const;
+
     // Both return a Null value on failure and, if `error` is non-null, put a
     // human-readable reason in it. A parse that succeeds never sets `error`.
+    //
+    // Strict about the things a hand-edited file gets wrong: the RFC 8259
+    // number grammar rather than whatever strtod will take (`+1`, `.5`, `01`,
+    // `1.`, `0x10`, `NaN` and `inf` are all refused), no non-finite results,
+    // and no unescaped control characters inside a string. Every file we ship
+    // and every document we write ourselves already satisfies all of it - the
+    // point is that a typo is now a message instead of a number nobody wrote.
     static Json parse(const std::string& text, std::string* error = nullptr);
     static Json parseFile(const std::string& path, std::string* error = nullptr);
 

@@ -37,11 +37,13 @@ struct State {
 
     static std::string path();
 
-    // Never fails the startup it is part of. A missing file means "first run";
-    // an unreadable or malformed one leaves every default above standing and
-    // says so on stderr - which the daemon has pointed at asuna.log. This file
-    // is disposable by design, and the alternative to carrying on without it is
-    // a pet that will not start because of its own scratchpad.
+    // Never fails the startup it is part of. A missing file means "first run"
+    // and is silent; an unreadable or malformed one leaves every default above
+    // standing and says so on stderr - which the daemon has pointed at
+    // asuna.log. So does a member that is present but of the wrong type,
+    // including an explicit null, which nothing here writes. This file is
+    // disposable by design, and the alternative to carrying on without it is a
+    // pet that will not start because of its own scratchpad.
     //
     // Always returns true; the bool is kept because it is part of the shape
     // callers were written against, and `if (mOpt.persist) mState.load();` is

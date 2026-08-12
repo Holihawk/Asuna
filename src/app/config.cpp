@@ -361,6 +361,13 @@ bool Config::parse(const std::string& text) {
     // Anything out of range is reported and *ignored*, leaving the default in
     // place. Clamping silently would be answering a question the user did not
     // ask, and they would never find out.
+    //
+    // "Ignored" is local, though, and reads as more forgiving than it is:
+    // anything pushed onto `problems` also stops the launch, because
+    // applyConfig (cli.cpp:202-212) refuses to start on a non-empty list. So
+    // the default standing here is what the value *would* have been, not what
+    // the run gets - there is no run. Worth knowing before adding a check: a
+    // new complaint locks out every config that currently works.
     const auto bounded = [&](const char* key, double v, double lo, double hi) {
         if (v >= lo && v <= hi) return true;
         problems.push_back(std::string("'") + key + "' must be between " +

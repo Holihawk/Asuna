@@ -1,6 +1,6 @@
-// Offline tests for the personality: src/character/behaviour.cpp,
-// src/character/dialogue.cpp and
-// the JSON reader they both stand on. No GL, no compositor, no pointer.
+// Offline tests for the personality: src/character/behaviour.cpp and
+// src/character/dialogue.cpp. No GL, no compositor, no pointer. The JSON reader
+// they stand on has its own suite in tests/json_test.cpp.
 //
 // Half of Phase 4 is scheduling - when she moves on her own, when she speaks,
 // when she falls asleep - on timescales of minutes. Watching that by hand is not
@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "character/dialogue.hpp"
-#include "json.hpp"
 
 namespace {
 
@@ -29,13 +28,6 @@ void check(bool ok, const char* expr, int line) {
     ++failures;
 }
 
-void checkNear(double got, double want, double tol, const char* what, int line) {
-    if (std::fabs(got - want) <= tol) return;
-    printf("  FAIL %s:%d  %s: got %.4f, want %.4f +- %.4f\n", current, line, what,
-           got, want, tol);
-    ++failures;
-}
-
 void checkEq(const std::string& got, const std::string& want, const char* what, int line) {
     if (got == want) return;
     printf("  FAIL %s:%d  %s: got \"%s\", want \"%s\"\n", current, line, what,
@@ -44,7 +36,6 @@ void checkEq(const std::string& got, const std::string& want, const char* what, 
 }
 
 #define CHECK(expr) check((expr), #expr, __LINE__)
-#define CHECK_NEAR(got, want, tol) checkNear((got), (want), (tol), #got, __LINE__)
 #define CHECK_EQ(got, want) checkEq((got), (want), #got, __LINE__)
 
 // Records everything Behaviour asks for, so a test can assert on the sequence
@@ -83,44 +74,12 @@ asuna::Behaviour make(Log* log) {
 }
 
 // --- JSON -----------------------------------------------------------------
-
-void jsonReadsWhatWeActuallyParse() {
-    // The two shapes that matter: index.json's hit_areas and its motions map.
-    std::string error;
-    const asuna::Json j = asuna::Json::parse(R"({
-        "hit_areas": [{"name": "head", "id": "D_REF.PT_HEAD"}],
-        "motions": {"": [{"file": "mtn/I_FUN.mtn"}], "idle": [{"file": "mtn/IDLING.mtn"}]},
-        "layout": {"center_x": 0, "y": 1.3, "width": 2.9}
-    })", &error);
-    CHECK(error.empty());
-    CHECK(j.isObject());
-    CHECK_EQ(j["hit_areas"][0]["name"].asString(), "head");
-    CHECK_EQ(j["motions"].keyAt(1), "idle");
-    CHECK_EQ(j["motions"]["idle"][0]["file"].asString(), "mtn/IDLING.mtn");
-    CHECK_NEAR(j["layout"]["y"].asNumber(), 1.3, 1e-9);
-
-    // A missing key must be silent rather than a crash: outfits differ, and a
-    // chain of lookups is how they are read.
-    CHECK(j["nope"]["also-nope"][3].isNull());
-    CHECK_EQ(j["nope"].asString(), "");
-    CHECK_NEAR(j["layout"]["width"].asNumber(99), 2.9, 1e-9);
-    CHECK_NEAR(j["layout"]["missing"].asNumber(99), 99, 1e-9);
-}
-
-void jsonRejectsRubbish() {
-    std::string error;
-    CHECK(asuna::Json::parse("{\"a\": }", &error).isNull());
-    CHECK(!error.empty());
-    error.clear();
-    CHECK(asuna::Json::parse("{\"a\": 1} trailing", &error).isNull());
-    CHECK(!error.empty());
-}
-
-void jsonDecodesUtf8AndEscapes() {
-    const asuna::Json j = asuna::Json::parse(R"({"a": "你好", "b": "raw ä \n"})");
-    CHECK_EQ(j["a"].asString(), "\xe4\xbd\xa0\xe5\xa5\xbd");   // 你好
-    CHECK_EQ(j["b"].asString(), "raw \xc3\xa4 \n");
-}
+//
+// The reader's own tests moved to tests/json_test.cpp in Phase 2.1, when the
+// number grammar and the string rules were tightened and there was enough of
+// them to want a suite. They started here because the dialogue file was the
+// first thing to need a parser; four things need it now. What is left below is
+// dialogue.cpp's use of it, which is this file's business.
 
 // --- dialogue -------------------------------------------------------------
 
@@ -485,9 +444,6 @@ struct Test { const char* name; void (*fn)(); };
 
 int main() {
     const Test tests[] = {
-        {"jsonReadsWhatWeActuallyParse", jsonReadsWhatWeActuallyParse},
-        {"jsonRejectsRubbish", jsonRejectsRubbish},
-        {"jsonDecodesUtf8AndEscapes", jsonDecodesUtf8AndEscapes},
         {"dialogueNeverRepeatsItself", dialogueNeverRepeatsItself},
         {"dialogueIsQuietAboutMissingKeys", dialogueIsQuietAboutTriggersItDoesNotHave},
         {"greetingFollowsTheClock", greetingFollowsTheClock},

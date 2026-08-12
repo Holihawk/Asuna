@@ -85,17 +85,19 @@ ctest --test-dir build --output-on-failure     # 4 suites at Phase 0
 ```
 
 Result: **4/4 passed**, 0.04 s total, in both the existing `build/` and the
-clean build. Phase 1 adds a fifth, `argparse`.
+clean build. Phase 1 adds `argparse` and `cli`, Phase 2 adds `state`, and
+Phase 2.1 adds `json`.
 
 | Suite | Binary sources | Self-reported result |
 | --- | --- | --- |
 | `motion` | `motion.cpp` | `all 15 tests passed` |
-| `behaviour` | `behaviour.cpp`, `dialogue.cpp`, `json.cpp` | `all 20 tests passed` |
+| `behaviour` | `behaviour.cpp`, `dialogue.cpp`, `json.cpp` | `all 17 tests passed` — was 20; the three JSON tests moved to `json` in Phase 2.1 |
 | `ipc` | `ipc.cpp`, `json.cpp`, `paths.cpp` | `ipc: all checks passed` (9 groups) |
 | `config` | `config.cpp`, `paths.cpp` | `all config tests passed` (6 groups) |
 | `argparse` | `argparse.cpp` | `all 16 tests passed` — **added in Phase 1** |
-| `cli` | the built `asuna` binary | `all 31 cli checks passed` — **added in Phase 1**; every case is decided before the control socket is touched, so it neither needs her running nor disturbs her if she is |
-| `state` | `state.cpp`, `json.cpp`, `paths.cpp` | `all 12 state tests passed` — **added in Phase 2**; runs against a temporary `XDG_STATE_HOME` and refuses to start if that redirect did not take |
+| `cli` | the built `asuna` binary | `all 44 cli checks passed` — **added in Phase 1**, extended in Phase 2.1; no case reaches a real daemon, so it neither needs her running nor disturbs her if she is |
+| `state` | `state.cpp`, `json.cpp`, `paths.cpp` | `all 14 state tests passed` — **added in Phase 2**; runs against a temporary `XDG_STATE_HOME` and refuses to start if that redirect did not take |
+| `json` | `json.cpp` | `all 12 json tests passed` — **added in Phase 2.1**; the number grammar, the string rules and the quote/parse pair |
 
 `behaviour` must run from the source tree — it reads `data/dialogue.zh.json`
 (CMakeLists.txt:120-121).
@@ -295,7 +297,7 @@ To be run before starting and after finishing each phase:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# tests — 4/4 at Phase 0, 6/6 from Phase 1, 7/7 from Phase 2
+# tests — 4/4 at Phase 0, 6/6 from Phase 1, 7/7 from Phase 2, 8/8 from Phase 2.1
 ctest --test-dir build --output-on-failure
 
 # python — expect exit 0, then clean up

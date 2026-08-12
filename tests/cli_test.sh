@@ -14,27 +14,35 @@
 #     handles by printing usage and returning "handled" - so the flag in front
 #     of it is fully parsed and validated, and nothing is ever started. That is
 #     the only way to assert "this value is accepted" without either forking a
-#     daemon or requiring one.
+#     daemon or requiring one;
+#   * the subcommands that go to the daemon are run with XDG_RUNTIME_DIR pointed
+#     at an empty temporary directory, which is where paths::socketPath() and
+#     paths::lockPath() are built from. There is no socket there and no lock, so
+#     the command is fully parsed, sends nothing, and exits kNotRunning. A real
+#     daemon is neither needed nor reachable, and the only thing left behind is
+#     an empty directory this script removes. That is what separates "rejected
+#     as bad usage" (2) from "accepted, nobody home" (3), which is exactly the
+#     distinction the say --for wiring bug lived in.
 #
-# What is deliberately not here: that `move -500` and `scale 3.0` reach the
-# daemon and get clamped by it. Both need a live daemon, and both would move or
-# resize somebody's pet as a side effect of running the test suite. The CLI half
-# - that those values parse rather than being refused - is asserted in
-# argparse_test.cpp through realAny. The clamping half is Phase 8.
+# What is deliberately not here: that `move -500` and `scale 3.0` reach a
+# running daemon and get *clamped* by it. That needs a live daemon and would
+# move or resize somebody's pet as a side effect of running the test suite. What
+# is here is the half above it - that those values leave the CLI intact rather
+# than being refused. The clamping itself is Phase 8.
 
 ASUNA="${1:?usage: cli_test.sh <path to asuna>}"
 
 failures=0
 checks=0
 
-# run <expected status> <expected message substring, or -> <args...>
-run() {
-    want_status="$1"
-    want_text="$2"
-    shift 2
-    checks=$((checks + 1))
-    output=$("$ASUNA" "$@" 2>&1)
-    status=$?
+# An empty session directory: no control socket, no lock. See the note above.
+NOWHERE=$(mktemp -d "${TMPDIR:-/tmp}/asuna-cli-test-XXXXXX") || exit 1
+trap 'rm -rf "$NOWHERE"' EXIT INT TERM
+# kNotRunning, from src/app/cli.hpp.
+ABSENT=3
+
+# Judges $status and $output against $want_status and $want_text.
+verdict() {
     if [ "$status" != "$want_status" ]; then
         printf '  FAIL asuna %s\n    exit %s, wanted %s\n' "$*" "$status" "$want_status"
         failures=$((failures + 1))
@@ -51,6 +59,30 @@ run() {
                 ;;
         esac
     fi
+}
+
+# run <expected status> <expected message substring, or -> <args...>
+run() {
+    want_status="$1"
+    want_text="$2"
+    shift 2
+    checks=$((checks + 1))
+    output=$("$ASUNA" "$@" 2>&1)
+    status=$?
+    verdict "$@"
+}
+
+# The same, with the session directory pointed somewhere empty, so a verb that
+# talks to the daemon gets all the way through parsing and then finds nobody.
+# A 2 here would mean the command was refused before it ever tried to send.
+run_absent() {
+    want_status="$1"
+    want_text="$2"
+    shift 2
+    checks=$((checks + 1))
+    output=$(XDG_RUNTIME_DIR="$NOWHERE" "$ASUNA" "$@" 2>&1)
+    status=$?
+    verdict "$@"
 }
 
 # --- malformed values are refused, and say so ------------------------------
@@ -104,6 +136,34 @@ run 0 "-" start --x 0 --help
 run 0 "-" start --margin 0 --help
 run 0 "-" start --gaze-halo 0 --help
 run 0 "-" --help
+
+# --- the subcommands, accepted all the way to the socket --------------------
+# Exit 3 means the value survived dispatch and the send found nobody home.
+
+echo "accepted by the subcommands"
+# The one the review asked for: proving `say --for 0` is refused does not prove
+# the floor is gone, because the bug was a *two-sided* range with a 0.001 floor
+# and every rejection case would still have passed with it in place. This is the
+# value that separates the two, and it has to get past dispatch to say so.
+run_absent "$ABSENT" "not running" say hi --for 0.0001
+run_absent "$ABSENT" "not running" say hi --for 0.001
+run_absent "$ABSENT" "not running" say hi --for 900
+run_absent "$ABSENT" "not running" say hi
+# Unranged on purpose: the daemon clamps to 0.5-2.5 and to what the screen has
+# room for. Refusing 3.0 here would refuse something that currently works.
+run_absent "$ABSENT" "not running" scale 3.0
+run_absent "$ABSENT" "not running" scale 0.1
+# Likewise: the daemon clamps x to the screen, which is the only thing that
+# knows how wide it is.
+run_absent "$ABSENT" "not running" move -500
+run_absent "$ABSENT" "not running" move 999999
+run_absent "$ABSENT" "not running" move left
+run_absent "$ABSENT" "not running" hide
+# And a bad value is still refused there rather than sent - a 3 would mean the
+# rubbish went to the daemon to be dealt with.
+run_absent 2 "needs a number" scale nope
+run_absent 2 "needs a number" move 1.2.3
+run_absent 2 "more than 0"    say hi --for 0
 
 if [ "$failures" -gt 0 ]; then
     printf '\n%s of %s checks failed\n' "$failures" "$checks"

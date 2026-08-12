@@ -10,15 +10,22 @@
 // A model path is a filename, and a Linux filename may hold a quote, a
 // backslash or a newline. Written raw, any of those produced a file that would
 // not parse, and took the position, the outfit and the layer down with it.
+//
+// The stderr assertions matter as much as the values. Everything load() refuses
+// it refuses non-fatally, leaving the default in place - so the only thing
+// standing between "handled" and "quietly threw away the outfit you picked" is
+// the line it writes, and a test that ignores stderr cannot tell the two apart.
 
 #include "app/state.hpp"
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <string>
 
@@ -30,6 +37,7 @@ namespace {
 
 int failures = 0;
 const char* current = "";
+fs::path tmpDir;
 
 void check(bool ok, const char* expr, int line) {
     if (ok) return;
@@ -62,8 +70,52 @@ void write(const std::string& path, const std::string& text) {
 
 void removeState() {
     std::error_code ec;
+    fs::permissions(asuna::State::path(), fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::add, ec);
     fs::remove(asuna::State::path(), ec);
 }
+
+// Runs `fn` with stderr pointed at a file and hands back what it wrote.
+//
+// Needed because half of what load() promises is a diagnostic: a state file
+// that is there but unreadable, and a member written with the wrong type, both
+// carry on with the defaults - so the only difference between "handled" and
+// "silently discarded somebody's outfit" is the line on stderr. Asserting the
+// return value alone cannot tell those two apart.
+std::string captureStderr(const std::function<void()>& fn) {
+    const std::string log = (tmpDir / "stderr.txt").string();
+    fflush(stderr);
+    const int saved = dup(STDERR_FILENO);
+    const int fd = open(log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (saved < 0 || fd < 0) {
+        printf("  FAIL %s  could not redirect stderr\n", current);
+        ++failures;
+        if (fd >= 0) close(fd);
+        if (saved >= 0) close(saved);
+        fn();
+        return "";
+    }
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+    fn();
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    const std::string out = slurp(log);
+    std::error_code ec;
+    fs::remove(log, ec);
+    return out;
+}
+
+// `text` appears somewhere in `haystack`.
+void checkSays(const std::string& haystack, const std::string& text, int line) {
+    if (haystack.find(text) != std::string::npos) return;
+    printf("  FAIL %s:%d  stderr said [%s]\n    wanted it to mention [%s]\n", current, line,
+           haystack.c_str(), text.c_str());
+    ++failures;
+}
+
+#define CHECK_SAYS(haystack, text) checkSays((haystack), (text), __LINE__)
 
 // Saves `in`, reads it back into a fresh State, and hands both to the caller.
 asuna::State roundTrip(const asuna::State& in) {
@@ -186,7 +238,10 @@ void positionsRoundToTheNearestPixel() {
 void aMissingFileIsAFirstRunNotAFailure() {
     removeState();
     asuna::State s;
-    CHECK(s.load());
+    // And it says nothing while doing it. A first start is the common case, and
+    // a complaint about a file that is *supposed* not to exist yet is noise in
+    // asuna.log that trains you to ignore the next one.
+    CHECK_EQ(captureStderr([&] { CHECK(s.load()); }), "");
     // Every default still standing is what makes "delete the file to reset"
     // work.
     CHECK(s.x < 0);
@@ -215,11 +270,45 @@ void aMalformedFileLeavesEveryDefaultStanding() {
         // Controlled: it carries on, and it does not fail the startup it is
         // part of. A pet that will not launch because of its own scratchpad is
         // worse than a pet that forgets where it was.
-        CHECK(s.load());
+        //
+        // Carrying on quietly would be a different matter - that is a position
+        // and an outfit reverting on every login with nothing said - so the
+        // line on stderr is part of the behaviour, not decoration.
+        const std::string said = captureStderr([&] { CHECK(s.load()); });
+        CHECK_SAYS(said, asuna::State::path());
+        CHECK_SAYS(said, "ignoring");
         CHECK(s.x < 0);
         CHECK(s.scale < 0);
         CHECK(s.model.empty());
     }
+}
+
+void anUnreadableFileIsSaidRatherThanTakenForAFirstRun() {
+    // The case a plain `if (!stream) return true;` cannot see: the file is
+    // there, it has her position in it, and it cannot be opened. Treated as a
+    // first run it looks exactly like a fresh install - she comes up at the
+    // config's anchor, every login, and nothing anywhere says why.
+    if (geteuid() == 0) {
+        printf("  (skipped: running as root, where mode 000 still reads)\n");
+        return;
+    }
+    write(asuna::State::path(), "{\"x\": 300, \"scale\": 1.5}");
+    std::error_code ec;
+    fs::permissions(asuna::State::path(), fs::perms::none, ec);
+    if (ec) {
+        printf("  (skipped: could not make the file unreadable)\n");
+        return;
+    }
+
+    asuna::State s;
+    const std::string said = captureStderr([&] { CHECK(s.load()); });
+    CHECK_SAYS(said, asuna::State::path());
+    // Still non-fatal, and still every default standing.
+    CHECK(s.x < 0);
+    CHECK(s.scale < 0);
+
+    fs::permissions(asuna::State::path(), fs::perms::owner_read | fs::perms::owner_write, ec);
+    removeState();
 }
 
 void aWrongTypedMemberIsIgnoredAndTheRestIsKept() {
@@ -229,13 +318,44 @@ void aWrongTypedMemberIsIgnoredAndTheRestIsKept() {
           "{\"x\": \"nope\", \"scale\": \"big\", \"model\": 7, \"layer\": \"bottom\","
           " \"output\": null, \"hidden\": \"yes\"}");
     asuna::State s;
-    CHECK(s.load());
+    const std::string said = captureStderr([&] { CHECK(s.load()); });
     CHECK(s.x < 0);            // refused, default kept
     CHECK(s.scale < 0);        // refused
     CHECK(s.model.empty());    // refused
     CHECK_EQ(s.layer, "bottom");   // the one good member still lands
     CHECK(s.output.empty());
     CHECK(s.hidden < 0);
+
+    // Every refused member named, including the null one. This file is only
+    // ever hand-edited, so a member that was written and does nothing is
+    // somebody watching for an effect that is not coming.
+    CHECK_SAYS(said, "x");
+    CHECK_SAYS(said, "scale");
+    CHECK_SAYS(said, "model");
+    CHECK_SAYS(said, "output");
+    CHECK_SAYS(said, "hidden");
+    CHECK_SAYS(said, "wrong type");
+    // The one that was right is not in the complaint.
+    CHECK(said.find("layer") == std::string::npos);
+}
+
+void anExplicitNullIsNamedAndAMissingKeyIsNot() {
+    // Both read as Null through Json::operator[], and they are not the same
+    // event: nothing here writes null, so `"output": null` is a hand edit that
+    // does nothing, while an absent `output` is just a setting never used.
+    // Telling them apart is the whole reason Json::has exists.
+    write(asuna::State::path(), "{\"output\": null, \"x\": 40}");
+    asuna::State withNull;
+    const std::string said = captureStderr([&] { withNull.load(); });
+    CHECK_SAYS(said, "output");
+    CHECK(withNull.output.empty());
+    CHECK(withNull.x == 40);
+
+    write(asuna::State::path(), "{\"x\": 40}");
+    asuna::State without;
+    CHECK_EQ(captureStderr([&] { without.load(); }), "");
+    CHECK(without.output.empty());
+    CHECK(without.x == 40);
 }
 
 void aStringThatLooksLikeANumberIsStillNotANumber() {
@@ -243,7 +363,7 @@ void aStringThatLooksLikeANumberIsStillNotANumber() {
     // "5" and 5 were the same thing to it. They are not the same thing.
     write(asuna::State::path(), "{\"x\": \"5\", \"scale\": 1.5}");
     asuna::State s;
-    s.load();
+    CHECK_SAYS(captureStderr([&] { s.load(); }), "x");
     CHECK(s.x < 0);
     CHECK(s.scale == 1.5f);
 }
@@ -294,6 +414,7 @@ int main() {
                          ("asuna-state-test-" + std::to_string(getpid()));
     fs::create_directories(tmp);
     setenv("XDG_STATE_HOME", tmp.c_str(), 1);
+    tmpDir = tmp;   // where captureStderr puts its scratch file
 
     // If this is not under our temporary directory, something resolved the path
     // before the variable was set and the suite would be writing over somebody's
@@ -316,8 +437,11 @@ int main() {
          theNeverPlacedSentinelIsNotRoundedIntoAPosition},
         {"positionsRoundToTheNearestPixel", positionsRoundToTheNearestPixel},
         {"aMissingFileIsAFirstRunNotAFailure", aMissingFileIsAFirstRunNotAFailure},
+        {"anUnreadableFileIsSaidRatherThanTakenForAFirstRun",
+         anUnreadableFileIsSaidRatherThanTakenForAFirstRun},
         {"aMalformedFileLeavesEveryDefaultStanding", aMalformedFileLeavesEveryDefaultStanding},
         {"aWrongTypedMemberIsIgnoredAndTheRestIsKept", aWrongTypedMemberIsIgnoredAndTheRestIsKept},
+        {"anExplicitNullIsNamedAndAMissingKeyIsNot", anExplicitNullIsNamedAndAMissingKeyIsNot},
         {"aStringThatLooksLikeANumberIsStillNotANumber",
          aStringThatLooksLikeANumberIsStillNotANumber},
         {"keysNestedInsideValuesAreNotMistakenForTheRealThing",

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace asuna {
@@ -82,6 +83,12 @@ Out& Out::raw(const char* key, const std::string& json) {
 Out& Out::str(const char* key, const std::string& value) { return raw(key, quote(value)); }
 
 Out& Out::num(const char* key, double value) {
+    // JSON has no spelling for infinity or NaN, and "%.6g" would write `inf` or
+    // `nan` - which the parser at the other end refuses, taking the whole reply
+    // down with it over one member. Nothing validated reaches here non-finite;
+    // this is the writer keeping the promise that everything we send, we can
+    // read. `null` rather than a made-up number, because there is no number.
+    if (!std::isfinite(value)) return raw(key, "null");
     char buf[32];
     snprintf(buf, sizeof(buf), "%.6g", value);
     return raw(key, buf);

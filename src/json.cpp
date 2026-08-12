@@ -1,5 +1,6 @@
 #include "json.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -64,6 +65,13 @@ const std::string& Json::keyAt(size_t i) const {
 }
 
 const Json& Json::valueAt(size_t i) const { return (*this)[i]; }
+
+bool Json::has(const std::string& key) const {
+    if (mType != Type::Object) return false;
+    for (const auto& kv : mObject)
+        if (kv.first == key) return true;
+    return false;
+}
 
 // --- parser ----------------------------------------------------------------
 
@@ -137,12 +145,54 @@ private:
         }
     }
 
+    static bool isDigit(char c) { return c >= '0' && c <= '9'; }
+
+    // The RFC 8259 grammar, walked here rather than left to strtod. strtod
+    // accepts a great deal that JSON does not - `+1`, `.5`, `01`, `1.`, `0x10`,
+    // `NaN`, `inf` - and every one of those is a slip in a hand-edited file
+    // that used to be read as a number nobody wrote. `01` was the worst of
+    // them: it parsed as 1, so a padded value silently lost its leading digit.
     bool parseNumber(Json* out) {
-        const char* begin = mText.c_str() + mPos;
-        char* end = nullptr;
-        const double v = strtod(begin, &end);
-        if (end == begin) return fail("expected a value");
-        mPos += static_cast<size_t>(end - begin);
+        const size_t begin = mPos;
+        if (mPos < mText.size() && mText[mPos] == '-') ++mPos;
+
+        // int: a lone 0, or a digit and the rest. No leading zeros, no `+`.
+        if (mPos >= mText.size() || !isDigit(mText[mPos])) {
+            mPos = begin;   // point at the start of the token, not into it
+            return fail("expected a value");
+        }
+        if (mText[mPos] == '0')
+            ++mPos;
+        else
+            while (mPos < mText.size() && isDigit(mText[mPos])) ++mPos;
+
+        // frac: the dot has to be followed by a digit, so `1.` is not a number.
+        if (mPos < mText.size() && mText[mPos] == '.') {
+            ++mPos;
+            if (mPos >= mText.size() || !isDigit(mText[mPos]))
+                return fail("expected a digit after '.'");
+            while (mPos < mText.size() && isDigit(mText[mPos])) ++mPos;
+        }
+
+        if (mPos < mText.size() && (mText[mPos] == 'e' || mText[mPos] == 'E')) {
+            ++mPos;
+            if (mPos < mText.size() && (mText[mPos] == '+' || mText[mPos] == '-')) ++mPos;
+            if (mPos >= mText.size() || !isDigit(mText[mPos]))
+                return fail("expected a digit in the exponent");
+            while (mPos < mText.size() && isDigit(mText[mPos])) ++mPos;
+        }
+
+        // Converted from exactly the run we just validated: handed the whole
+        // remaining text, strtod would read `0x10` as 16 after we had accepted
+        // only the `0`.
+        const std::string token = mText.substr(begin, mPos - begin);
+        const double v = strtod(token.c_str(), nullptr);
+        // 1e400 is well-formed and still has no value we can hold. Underflow is
+        // not the same case: 1e-400 becomes 0, which is the answer.
+        if (!std::isfinite(v)) {
+            mPos = begin;
+            return fail("number out of range");
+        }
         out->mType = Json::Type::Number;
         out->mNumber = v;
         return true;
@@ -153,8 +203,19 @@ private:
         ++mPos;
         out->clear();
         while (mPos < mText.size()) {
-            const char c = mText[mPos++];
-            if (c == '"') return true;
+            const char c = mText[mPos];
+            if (c == '"') {
+                ++mPos;
+                return true;
+            }
+            // JSON requires the C0 controls to be escaped, and `quote` below
+            // escapes them - so a raw one means the file was written by
+            // something else. Read literally it produces a string with a real
+            // newline in it, which is how a truncated document reads as a short
+            // value instead of an error.
+            if (static_cast<unsigned char>(c) < 0x20)
+                return fail("unescaped control character in string");
+            ++mPos;
             if (c != '\\') {
                 out->push_back(c);
                 continue;
