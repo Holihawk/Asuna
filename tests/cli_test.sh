@@ -111,6 +111,19 @@ run_cfg() {
     verdict "$@"
 }
 
+# Neither her session nor her config: an empty runtime directory and the config
+# file this script writes. For the verbs that read both, so that nothing here
+# depends on how whoever runs the suite has configured Asuna.
+run_alone() {
+    want_status="$1"
+    want_text="$2"
+    shift 2
+    checks=$((checks + 1))
+    output=$(XDG_RUNTIME_DIR="$NOWHERE" XDG_CONFIG_HOME="$CFGROOT" "$ASUNA" "$@" 2>&1)
+    status=$?
+    verdict "$@"
+}
+
 # Replaces the test config file with its arguments, one line each.
 write_config() {
     : > "$CFGROOT/asuna/config.toml"
@@ -264,6 +277,43 @@ run_absent 2 "needs a number" scale nope
 run_absent 2 "needs a number" move 1.2.3
 run_absent 2 "more than 0"    say hi --for 0
 
+# --- the `ext` grammar -------------------------------------------------------
+# Every one of these is refused before anything is read, sent or signalled, so
+# they need neither a daemon nor a pid file. --force used to be looked for
+# anywhere in the argument list and everything else ignored, which accepted four
+# commands that read as if they did something: `ext status --force` treated a
+# safety-sensitive option as irrelevant, and `ext stop garbage` exited 0.
+
+echo "ext takes exactly its verb, and --force only where it means something"
+# The verb is judged first, so a wrong one is answered with the list of verbs
+# rather than with a complaint about an option that was never the problem.
+run_alone 2 "ext takes"     ext bogus
+run_alone 2 "ext takes"     ext bogus --force
+run_alone 2 "does not take" ext stop garbage
+run_alone 2 "does not take" ext cancel garbage
+run_alone 2 "does not take" ext status garbage
+run_alone 2 "does not take" ext restart garbage
+run_alone 2 "does not take" ext stop --forced
+run_alone 2 "only for"      ext status --force
+run_alone 2 "only for"      ext start --force
+run_alone 2 "only for"      ext test --force
+run_alone 2 "only for"      ext cancel --force
+run_alone 2 "only for"      ext config --force
+run_alone 2 "given twice"   ext stop --force --force
+run_alone 2 "given twice"   ext restart --force --force
+
+echo "and the four forms that are the grammar still get through it"
+# A 2 in any of these would mean the strictness had eaten something real.
+# `stop` decides everything from the pid file, and there is none here.
+rm -f "$NOWHERE/asuna/ext.pid"
+run_alone 0 "not running" ext stop
+run_alone 0 "not running" ext stop --force
+# `restart` reads the config, which is this script's own with extensions off, so
+# both forms are parsed, accepted, and stop at the first real gate.
+write_config '[ext]' 'enabled = false'
+run_alone 1 "extensions are off" ext restart
+run_alone 1 "extensions are off" ext restart --force
+
 # --- `config check`, and what it says in each shape --------------------------
 # Reads a file this script wrote, via XDG_CONFIG_HOME. Nothing here starts a
 # daemon or looks at the user's own config.
@@ -390,12 +440,213 @@ run_fake 0 "helper running" ext status
 run_fake 1 "cannot be"      ext stop
 run_fake 1 "--force"        ext stop
 # A pid file whose recorded start time does not match is not a helper at all,
-# and is never signalled - forced or otherwise.
+# and is never signalled - forced or otherwise. The pid here is this script: if
+# --force ever reached a recycled identity, the suite would die where it stands.
 printf '%d 424242\n' "$$" > "$FAKEDIR/asuna/ext.pid"
 run_fake 0 "different process" ext stop
 run_fake 0 "not running"       ext stop
+printf '%d 424242\n' "$$" > "$FAKEDIR/asuna/ext.pid"
+run_fake 0 "different process" ext stop --force
+run_fake 0 "not running"       ext stop --force
 stop_fake
 rm -f "$FAKEDIR/asuna/ext.pid"
+
+# --- what `ext stop` actually signals ---------------------------------------
+#
+# The section above is about refusals, which can be checked against pid files
+# naming this script. These are the paths that end in a real signal, so they need
+# a process of their own to stand in for the helper: `sleep`, which this script
+# starts and is therefore allowed to kill. Nothing here needs a daemon - `stop`
+# decides everything from the pid file - and nothing here touches the user's
+# session, because the pid file is the one under $FAKEDIR.
+
+mkdir -p "$FAKEDIR/asuna"
+
+# Reaps $1 and checks it was killed by SIGTERM. `wait` reporting 128 + 15 is what
+# actually happened to that process; looking the pid up again afterwards would be
+# asking about a number that is by then free to be reused.
+killed_by_term() {
+    checks=$((checks + 1))
+    wait "$1" 2>/dev/null
+    left=$?
+    if [ "$left" != 143 ]; then
+        printf '  FAIL the stand-in helper (pid %s) left with %s, wanted 143 (SIGTERM)\n' \
+            "$1" "$left"
+        failures=$((failures + 1))
+    fi
+}
+
+# gone_pidfile <what this was>: a stop that stopped something removes the file.
+gone_pidfile() {
+    checks=$((checks + 1))
+    if [ -e "$FAKEDIR/asuna/ext.pid" ]; then
+        printf '  FAIL %s: %s is still there\n' "$1" "$FAKEDIR/asuna/ext.pid"
+        failures=$((failures + 1))
+    fi
+}
+
+# kept_pidfile <what this was>: and a stop that could not happen leaves it, since
+# it is the only record of what still needs stopping.
+kept_pidfile() {
+    checks=$((checks + 1))
+    if [ ! -e "$FAKEDIR/asuna/ext.pid" ]; then
+        printf '  FAIL %s: %s was deleted while its helper was still running\n' \
+            "$1" "$FAKEDIR/asuna/ext.pid"
+        failures=$((failures + 1))
+    fi
+}
+
+# still_running <pid> <what this was>: field 3 of /proc/<pid>/stat, because
+# `kill -0` cannot tell a live process from one this script has killed and not
+# yet reaped - a zombie child accepts signal 0 from its parent.
+still_running() {
+    checks=$((checks + 1))
+    if [ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" != S ]; then
+        printf '  FAIL %s: the stand-in helper (pid %s) was signalled anyway\n' "$2" "$1"
+        failures=$((failures + 1))
+    fi
+}
+
+# The start time as /proc records it, which is what makes the pid an identity.
+started_at() { awk '{print $22}' "/proc/$1/stat"; }
+
+echo "ext stop: a proven identity is signalled, once, and then forgotten"
+sleep 300 &
+SLEEPER=$!
+printf '%d %s\n' "$SLEEPER" "$(started_at "$SLEEPER")" > "$FAKEDIR/asuna/ext.pid"
+run_fake 0 "helper stopped" ext stop
+killed_by_term "$SLEEPER"
+gone_pidfile "a proven stop"
+
+echo "ext stop --force: the one identity it is for, and it does signal it"
+# One field, so nothing can prove what it names - the upgrade case. Refused
+# without --force, carried out with it, and said out loud either way.
+sleep 300 &
+SLEEPER=$!
+printf '%d\n' "$SLEEPER" > "$FAKEDIR/asuna/ext.pid"
+run_fake 1 "cannot be"      ext stop
+run_fake 0 "helper stopped" ext stop --force
+killed_by_term "$SLEEPER"
+gone_pidfile "a forced stop"
+# The warning that goes with it, which needs a second stand-in: each run asserts
+# one message, and the run above ended the first one.
+sleep 300 &
+SLEEPER=$!
+printf '%d\n' "$SLEEPER" > "$FAKEDIR/asuna/ext.pid"
+run_fake 0 "without having proved" ext stop --force
+killed_by_term "$SLEEPER"
+
+echo "ext stop: a pid that is not a process is not signalled, forced or not"
+# A pid this script owned and reaped, so it names nothing. --force has nothing to
+# pin, which is the third condition on reaching the unproven path at all.
+sleep 0 &
+FREED=$!
+wait "$FREED" 2>/dev/null
+printf '%d %s\n' "$FREED" 424242 > "$FAKEDIR/asuna/ext.pid"
+run_fake 0 "not running" ext stop --force
+gone_pidfile "a stop on a pid that is not a process"
+printf '%d\n' "$FREED" > "$FAKEDIR/asuna/ext.pid"
+run_fake 0 "not running" ext stop --force
+gone_pidfile "a forced stop on a one-field file naming nothing"
+
+echo "ext stop: a shortage of descriptors refuses rather than guesses"
+# The one refusal where nothing can be proved and nothing has gone either. Under
+# `ulimit -n 4` there is a descriptor for the loader but not for two files at
+# once, so either pidfd_open or the /proc read that confirms the identity fails
+# with EMFILE. That used to be indistinguishable from a start time that did not
+# match: a live helper was reported gone and the one file naming it was deleted.
+# It has to fail closed - nothing signalled, nothing removed - because a safety
+# property that lapses under load is absent exactly when it is needed.
+#
+# Four is enough for the loader here; somewhere with more shared libraries the
+# binary may not start at all, which is no failure of what is under test. So the
+# two invariants are checked either way and the message only when it ran.
+sleep 300 &
+SLEEPER=$!
+printf '%d %s\n' "$SLEEPER" "$(started_at "$SLEEPER")" > "$FAKEDIR/asuna/ext.pid"
+checks=$((checks + 1))
+starved=$( (ulimit -n 4
+            XDG_RUNTIME_DIR="$FAKEDIR" XDG_CONFIG_HOME="$CFGROOT" "$ASUNA" ext stop 2>&1) )
+starved_status=$?
+if [ "$starved_status" = 127 ]; then
+    printf '  note: `ulimit -n 4` will not start the binary here, so only the two\n'
+    printf '        invariants were checked and not the message\n'
+elif [ "$starved_status" = 0 ]; then
+    printf '  FAIL ext stop under `ulimit -n 4` reported a stop that did not happen\n'
+    printf '    said: %s\n' "$starved"
+    failures=$((failures + 1))
+else
+    case "$starved" in
+        *"safe hold"*) ;;
+        *)
+            printf '  FAIL ext stop under `ulimit -n 4`\n    said: %s\n' "$starved"
+            printf '    wanted to contain: safe hold\n'
+            failures=$((failures + 1))
+            ;;
+    esac
+fi
+still_running "$SLEEPER" "a stop that ran out of descriptors"
+kept_pidfile "a stop that ran out of descriptors"
+kill "$SLEEPER" 2>/dev/null
+wait "$SLEEPER" 2>/dev/null
+rm -f "$FAKEDIR/asuna/ext.pid"
+
+# --- what `ext start` does about a pid file it could not write ---------------
+#
+# The only process that knows the helper's pid is the middle one of the double
+# fork, so it is the only one that can write the file - and its exit status was
+# discarded. A failed write was therefore reported as a successful start, leaving
+# a helper that `ext status` printed as pid 0 and `ext stop` could not signal at
+# all. Both halves are checked here: that the failure is reported, and that the
+# helper is taken back down rather than left running under a name nothing has.
+#
+# The stand-in helper is `sleep 314159`, launched through `[ext] command`. The
+# argument is distinctive so that looking for strays cannot match anything else
+# on the machine, and long enough that a leaked one would be obvious.
+MARKER="sleep 314159"
+
+# no_stray <what this was>: nothing of ours is still running.
+no_stray() {
+    if ! command -v pgrep > /dev/null 2>&1; then
+        printf '  note: no pgrep here, so strays after %s were not checked\n' "$1"
+        return
+    fi
+    checks=$((checks + 1))
+    if pgrep -f "$MARKER" > /dev/null 2>&1; then
+        printf '  FAIL %s: left a helper running that nothing could name\n' "$1"
+        failures=$((failures + 1))
+        pkill -f "$MARKER" 2>/dev/null
+    fi
+}
+
+write_config '[ext]' 'enabled = true' "command = \"$MARKER\"" 'providers = ["x"]' \
+    '[ext.provider.x]' 'base_url = "https://example.invalid/v1"' 'model = "m"'
+
+echo "ext start: a helper it could not record is not left running"
+# The write is made to fail with a *directory* where the pid file goes: the
+# temporary is written normally and the rename onto it cannot succeed. Everything
+# before that behaves exactly as usual - the log is opened, the helper is exec'd -
+# which is what makes this the case the old code reported as a success.
+start_fake '{"ok":true,"data":{"subscribers":1,"enabled":true,"vision_enabled":false}}' || exit 1
+rm -f "$FAKEDIR/asuna/ext.pid"
+mkdir -p "$FAKEDIR/asuna/ext.pid"
+run_fake 1 "could not write" ext start
+rmdir "$FAKEDIR/asuna/ext.pid" 2>/dev/null
+rm -f "$FAKEDIR/asuna/ext.pid.tmp"
+no_stray "a start that could not write its pid file"
+
+echo "ext start: and the ordinary path still starts one and records it"
+# The other side of the same change: propagating the failure must not have made
+# a working start report one. This goes all the way through - the helper is
+# launched, the file names it, and a plain `ext stop` proves that identity and
+# signals it.
+rm -f "$FAKEDIR/asuna/ext.pid"
+run_fake 0 "helper running" ext start
+kept_pidfile "a helper that started"
+run_fake 0 "helper stopped" ext stop
+gone_pidfile "a stop after a real start"
+no_stray "a start followed by a stop"
+stop_fake
 
 if [ "$failures" -gt 0 ]; then
     printf '\n%s of %s checks failed\n' "$failures" "$checks"

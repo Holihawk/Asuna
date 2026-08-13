@@ -16,7 +16,9 @@ directory the test removes.
     fake_daemon.py <socket path> <reply file>
 
 `reply file` holds one JSON reply line per request, in order; the last line is
-reused if more requests arrive than there are lines. Serves until killed.
+reused if more requests arrive than there are lines. A connection that asks
+nothing - `ipc::alive()` probing whether anybody is home - is answered with
+nothing and consumes no line. Serves until killed.
 """
 
 import os
@@ -53,13 +55,23 @@ def main():
         while True:
             conn, _ = server.accept()
             with conn:
-                # The client half-closes after its request, so reading to EOF is
-                # enough and there is no need to look for the newline.
-                while conn.recv(4096):
+                try:
+                    # The client half-closes after its request, so reading to EOF
+                    # is enough and there is no need to look for the newline.
+                    while conn.recv(4096):
+                        pass
+                    reply = replies[min(served, len(replies) - 1)]
+                    conn.sendall(reply.encode("utf-8") + b"\n")
+                    served += 1
+                except OSError:
+                    # One client going away is not a reason to stop serving.
+                    # ipc::alive() connects, closes and asks nothing, so the
+                    # reply to that probe has nowhere to go - and before this was
+                    # caught here, the outer handler took the socket down with it,
+                    # so the first `ext start` under test left every later case
+                    # looking at a daemon that had quietly gone. A probe that got
+                    # no reply does not consume one either.
                     pass
-                reply = replies[min(served, len(replies) - 1)]
-                served += 1
-                conn.sendall(reply.encode("utf-8") + b"\n")
     except (KeyboardInterrupt, OSError):
         pass
     finally:

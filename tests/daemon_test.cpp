@@ -13,7 +13,10 @@
 
 #include "app/daemon.hpp"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -23,6 +26,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -85,6 +89,49 @@ void anAbsentProcessHasNoStartTime() {
     CHECK(asuna::daemon::startTime(deadPid()) == 0);
     CHECK(asuna::daemon::startTime(0) == 0);
     CHECK(asuna::daemon::startTime(-1) == 0);
+
+    // And when asked, it says *which* nothing this is: an absent process rather
+    // than an unreadable one.
+    int unreadable = -1;
+    CHECK(asuna::daemon::startTime(deadPid(), &unreadable) == 0);
+    CHECK(unreadable == 0);
+    unreadable = -1;
+    CHECK(asuna::daemon::startTime(getpid(), &unreadable) != 0);
+    CHECK(unreadable == 0);
+}
+
+void anUnreadableProcIsNotAnAbsentProcess() {
+    // The other zero. /proc/self/stat plainly exists, so a failure to open it is
+    // this machine being short of descriptors and says nothing about whether the
+    // process is there - and the difference matters because the caller that
+    // compares this value is the one about to send a signal. Conflating them let
+    // a full descriptor table read as "the helper has gone", which removed the
+    // only file naming a helper that was still running.
+    //
+    // Exhausted for real rather than simulated: a low RLIMIT_NOFILE and every
+    // descriptor under it taken, which is how it happens.
+    rlimit was{};
+    CHECK(getrlimit(RLIMIT_NOFILE, &was) == 0);
+    rlimit few = was;
+    few.rlim_cur = 8;
+    CHECK(setrlimit(RLIMIT_NOFILE, &few) == 0);
+
+    std::vector<int> held;
+    for (;;) {
+        const int fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) break;
+        held.push_back(fd);
+    }
+    int unreadable = 0;
+    const unsigned long long unknown = asuna::daemon::startTime(getpid(), &unreadable);
+    for (const int fd : held) ::close(fd);
+    setrlimit(RLIMIT_NOFILE, &was);
+
+    CHECK(!held.empty());        // the table really was filled
+    CHECK(unknown == 0);         // so it could not tell
+    CHECK(unreadable != 0);      // and it says why, rather than implying absence
+    // And with descriptors to spare again, the same pid answers as it did.
+    CHECK(asuna::daemon::startTime(getpid()) != 0);
 }
 
 void aFileWeJustWroteNamesUs() {
@@ -207,6 +254,8 @@ void aProvenIdentityCanBeOpenedAndSignalled() {
 
     asuna::daemon::Signal target;
     CHECK(target.open(id));
+    CHECK(target.refusal() == asuna::daemon::Signal::Refusal::kNone);
+    CHECK(target.error() == 0);
     // On this kernel it is a pidfd, which is the whole point; the fallback is
     // still correct but not race-free, and a test that could not tell them
     // apart would pass either way.
@@ -235,6 +284,11 @@ void anUnverifiedIdentityIsNotSomethingToSignal() {
 
     asuna::daemon::Signal target;
     CHECK(!target.open(id));   // `stop` may not
+    // And says which refusal it was. This is the *only* one --force may answer:
+    // the identity was never provable, rather than shown to have moved on or
+    // withheld by the kernel.
+    CHECK(target.refusal() == asuna::daemon::Signal::Refusal::kUnprovable);
+    CHECK(target.error() == 0);
     CHECK(!target.alive());
     CHECK(!target.send(SIGTERM));
 
@@ -261,6 +315,10 @@ void arecycledIdentityCannotBeOpenedAtAll() {
     asuna::daemon::Signal target;
     CHECK(!target.open(id));
     CHECK(!target.send(SIGKILL));   // and would have killed this very test
+    // Refused as unprovable rather than as changed: readPidFile already decided
+    // this file does not name a live helper, so open() never got as far as
+    // asking the kernel about the pid.
+    CHECK(target.refusal() == asuna::daemon::Signal::Refusal::kUnprovable);
 }
 
 void aHandleRefusesAnIdentityThatDoesNotMatch() {
@@ -275,10 +333,48 @@ void aHandleRefusesAnIdentityThatDoesNotMatch() {
     asuna::daemon::Signal target;
     CHECK(!target.open(forged));
     CHECK(!target.send(SIGTERM));
+    // kChanged, and this is the distinction the CLI turns on: an identity that
+    // *was* proven and no longer is may not be forced, where one that was never
+    // provable may. Reported as the same bare `false` they were indistinguishable
+    // from the caller, and a plain `ext stop` in this exact race went on to pin
+    // the current holder of the number and signal it.
+    CHECK(target.refusal() == asuna::daemon::Signal::Refusal::kChanged);
+    CHECK(target.refusal() != asuna::daemon::Signal::Refusal::kUnprovable);
+    // Nothing was withheld by the kernel, so there is no errno to report.
+    CHECK(target.error() == 0);
 
     kill(child, SIGKILL);
     int status = 0;
     waitpid(child, &status, 0);
+}
+
+void aProcessThatHasGoneIsNotAKernelWithoutPidfds() {
+    // A pid that is not a process at all. pidfd_open answers ESRCH, and the
+    // difference between that and ENOSYS is the whole of finding 2: ENOSYS is
+    // the one answer the bare-pid fallback is for, and every other failure -
+    // ESRCH here, EMFILE or ENOMEM on a busy machine - has to refuse instead.
+    // Treating them alike would mean a shortage of file descriptors silently
+    // buying the weaker check.
+    const pid_t dead = deadPid();
+    asuna::daemon::Identity forged;
+    forged.pid = dead;
+    forged.began = 12345;
+    forged.state = asuna::daemon::Owner::kAlive;   // claimed, not true
+
+    asuna::daemon::Signal target;
+    CHECK(!target.open(forged));
+    CHECK(target.refusal() == asuna::daemon::Signal::Refusal::kChanged);
+    CHECK(target.refusal() != asuna::daemon::Signal::Refusal::kUnavailable);
+    // Not a handle, so not `exact()` - but not the fallback either. There is no
+    // process, and both roads end in sending nothing.
+    CHECK(!target.exact());
+    CHECK(!target.alive());
+    CHECK(!target.send(SIGTERM));
+
+    // --force cannot reach it either: nothing to pin.
+    asuna::daemon::Signal forced;
+    CHECK(!forced.openUnproven(dead));
+    CHECK(forced.refusal() == asuna::daemon::Signal::Refusal::kChanged);
 }
 
 void aHandleToADeadProcessSignalsNobody() {
@@ -296,7 +392,31 @@ void aHandleToADeadProcessSignalsNobody() {
     // process, so it reports gone and sends nothing - where a bare `kill(pid,
     // SIGKILL)` would have gone to whoever inherited the number.
     CHECK(!target.alive());
-    CHECK(!target.send(SIGKILL));
+    int err = -1;
+    CHECK(!target.send(SIGKILL, &err));
+    // ESRCH and not something else, because the caller has to tell "it had
+    // already stopped", which is a stop, from "it is running and I could not
+    // signal it", which must not be reported as one.
+    CHECK(err == ESRCH);
+}
+
+void aPidNothingCanBeNamedInIsNotWritten() {
+    // A pid with no /proc entry: nothing to record a start time from. The file
+    // that would be written is the old one-field format, which `ext stop` may
+    // not signal - so a helper would be left running under a number no later
+    // command could be sure of. Failing is what lets `ext start` decide not to
+    // leave one; see cmdExtStart.
+    std::error_code ec;
+    fs::remove(pidFile(), ec);
+    CHECK(!asuna::daemon::writePidFile(pidFile().string(), deadPid()));
+    // And nothing left behind: neither the file nor the temporary it goes
+    // through, because a half-made identity is the thing being avoided.
+    CHECK(!fs::exists(pidFile()));
+    CHECK(!fs::exists(pidFile().string() + ".tmp"));
+
+    CHECK(!asuna::daemon::writePidFile(pidFile().string(), 0));
+    CHECK(!asuna::daemon::writePidFile(pidFile().string(), -1));
+    CHECK(!fs::exists(pidFile()));
 }
 
 void aProcessWithAnAwkwardNameIsStillReadable() {
@@ -327,6 +447,7 @@ int main() {
     const Test tests[] = {
         {"aStartTimeIsStableAndSpecificToTheProcess", aStartTimeIsStableAndSpecificToTheProcess},
         {"anAbsentProcessHasNoStartTime", anAbsentProcessHasNoStartTime},
+        {"anUnreadableProcIsNotAnAbsentProcess", anUnreadableProcIsNotAnAbsentProcess},
         {"aFileWeJustWroteNamesUs", aFileWeJustWroteNamesUs},
         {"aRecycledPidIsNotOurProcess", aRecycledPidIsNotOurProcess},
         {"aStaleFileIsGoneRatherThanRecycled", aStaleFileIsGoneRatherThanRecycled},
@@ -337,7 +458,9 @@ int main() {
         {"anUnverifiedIdentityIsNotSomethingToSignal", anUnverifiedIdentityIsNotSomethingToSignal},
         {"arecycledIdentityCannotBeOpenedAtAll", arecycledIdentityCannotBeOpenedAtAll},
         {"aHandleRefusesAnIdentityThatDoesNotMatch", aHandleRefusesAnIdentityThatDoesNotMatch},
+        {"aProcessThatHasGoneIsNotAKernelWithoutPidfds", aProcessThatHasGoneIsNotAKernelWithoutPidfds},
         {"aHandleToADeadProcessSignalsNobody", aHandleToADeadProcessSignalsNobody},
+        {"aPidNothingCanBeNamedInIsNotWritten", aPidNothingCanBeNamedInIsNotWritten},
         {"aProcessWithAnAwkwardNameIsStillReadable", aProcessWithAnAwkwardNameIsStillReadable},
     };
 

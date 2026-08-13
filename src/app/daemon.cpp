@@ -162,10 +162,21 @@ long rssKb() {
     return resident * (sysconf(_SC_PAGESIZE) / 1024);
 }
 
-unsigned long long startTime(pid_t pid) {
+unsigned long long startTime(pid_t pid, int* unreadable) {
+    if (unreadable) *unreadable = 0;
     if (pid <= 0) return 0;
-    std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
-    if (!f) return 0;
+    const std::string path = "/proc/" + std::to_string(pid) + "/stat";
+    errno = 0;
+    std::ifstream f(path);
+    if (!f) {
+        // Which zero this is. stat(2) needs no descriptor of its own, so it can
+        // still answer when a full descriptor table is the reason the open above
+        // failed - which is exactly the case where the difference matters.
+        const int why = errno;
+        struct stat sb;
+        if (unreadable && ::stat(path.c_str(), &sb) == 0) *unreadable = why ? why : EIO;
+        return 0;
+    }
     std::string line;
     std::getline(f, line);
 
@@ -198,6 +209,12 @@ bool writePidFile(const std::string& path, pid_t pid) {
     // now, and a reader that catches a half-written line sees a truncated pid,
     // which is a different process. Same argument as State::save.
     const unsigned long long began = startTime(pid);
+    // No start time, no file. Writing the pid alone would produce the old
+    // one-field record, which readPidFile has to call kUnverified and `ext stop`
+    // may not signal - so the helper would run under a number nothing could
+    // ever be sure of. That state is for files written before this build
+    // existed, not for this build to create; see the header.
+    if (began == 0) return false;
     const std::string tmp = path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::trunc);
@@ -216,14 +233,21 @@ bool writePidFile(const std::string& path, pid_t pid) {
 
 Identity readPidFile(const std::string& path) {
     Identity id;
-    std::ifstream f(path);
-    if (!(f >> id.pid) || id.pid <= 0) {
-        id.pid = 0;
-        return id;   // kGone
-    }
-
     unsigned long long recorded = 0;
-    const bool haveStart = static_cast<bool>(f >> recorded);
+    bool haveStart = false;
+    {
+        // Closed before /proc is opened, rather than held across it. Two files
+        // open at once needs two free descriptors, and with only one to spare the
+        // /proc read failed - which this function had no way to tell from "no
+        // such process", so a running helper was reported as gone. Reading them
+        // one after the other needs one.
+        std::ifstream f(path);
+        if (!(f >> id.pid) || id.pid <= 0) {
+            id.pid = 0;
+            return id;   // kGone
+        }
+        haveStart = static_cast<bool>(f >> recorded);
+    }
 
     const unsigned long long now = startTime(id.pid);
     if (now == 0) return id;   // kGone: no such process, whatever the file says
@@ -248,29 +272,67 @@ void Signal::shut() {
     mFd = -1;
     mPid = 0;
     mBegan = 0;
+    mRefusal = Refusal::kNone;
+    mError = 0;
 }
 
 namespace {
 
+// Both syscall numbers or neither. A handle that could be opened but not
+// signalled through would be worse than no handle at all - it would report
+// `exact()` and then fail every send - and the two calls arrived one kernel
+// release apart, so there is no toolchain with one that wants the other.
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+#define ASUNA_HAVE_PIDFD 1
+#endif
+
+// What asking the kernel for a handle to a process came back with.
+//
+// An `int` that was either an fd or -1 used to be the whole answer, and it
+// conflated two unrelated things: a kernel that has no pidfds, where re-reading
+// the start time immediately before kill(2) is the best available and is what
+// `exact()` exists to report, and a pidfd_open that failed for a reason of its
+// own. Buying the weaker guarantee with EMFILE or ENOMEM is precisely backwards:
+// those are the moments to fail closed.
+struct Handle {
+    int fd = -1;
+    int err = 0;          // errno, when there is no fd
+    bool absent = false;  // no pidfd_open here at all, rather than one that failed
+};
+
 // syscall() rather than the glibc wrappers: pidfd_open arrived in glibc 2.36
 // and pidfd_send_signal has never had one, so going through the numbers is both
-// the older-toolchain path and the only path for one of the two. A kernel
-// without them answers ENOSYS, which is what the -1 fallback below is for.
-int openPidfd(pid_t pid) {
-#ifdef SYS_pidfd_open
-    return static_cast<int>(syscall(SYS_pidfd_open, pid, 0u));
+// the older-toolchain path and the only path for one of the two.
+Handle openPidfd(pid_t pid) {
+    Handle h;
+#ifdef ASUNA_HAVE_PIDFD
+    h.fd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0u));
+    if (h.fd >= 0) return h;
+    h.err = errno;
+    h.fd = -1;
+    // ENOSYS is the kernel saying it has never heard of the call, which is the
+    // one answer the bare-pid fallback is for. EMFILE, ENFILE and ENOMEM are
+    // this machine being short of something; EPERM is a process we may not
+    // touch; ESRCH is a process that has gone, which is a reason not to signal
+    // that number rather than a reason to signal it by hand.
+    h.absent = h.err == ENOSYS;
 #else
     (void)pid;
-    return -1;
+    h.absent = true;
+    h.err = ENOSYS;
 #endif
+    return h;
 }
 
-bool sendThroughPidfd(int fd, int sig) {
-#ifdef SYS_pidfd_send_signal
-    return syscall(SYS_pidfd_send_signal, fd, sig, nullptr, 0u) == 0;
+bool sendThroughPidfd(int fd, int sig, int* err) {
+#ifdef ASUNA_HAVE_PIDFD
+    if (syscall(SYS_pidfd_send_signal, fd, sig, nullptr, 0u) == 0) return true;
+    if (err) *err = errno;
+    return false;
 #else
     (void)fd;
     (void)sig;
+    if (err) *err = ENOSYS;
     return false;
 #endif
 }
@@ -279,30 +341,56 @@ bool sendThroughPidfd(int fd, int sig) {
 
 bool Signal::open(const Identity& id) {
     shut();
-    if (!id.proven() || id.began == 0) return false;
+    if (!id.proven() || id.began == 0) {
+        mRefusal = Refusal::kUnprovable;
+        return false;
+    }
 
     // The handle first, the confirmation second. The other order - confirm,
     // then open - leaves exactly the gap this class is for: the process can end
     // and its number be reissued in between, and the handle would then name the
     // newcomer.
-    const int fd = openPidfd(id.pid);
-    if (startTime(id.pid) != id.began) {
-        if (fd >= 0) ::close(fd);
+    const Handle h = openPidfd(id.pid);
+    if (h.fd < 0 && !h.absent) {
+        mRefusal = h.err == ESRCH ? Refusal::kChanged : Refusal::kUnavailable;
+        mError = h.err;
+        return false;
+    }
+    // "Cannot look" is not "has gone". Comparing an unreadable /proc against the
+    // recorded time would make a live helper look recycled, and the caller acts
+    // on that by removing the file that names it - so the same distinction the
+    // handle above is careful about applies to its confirmation.
+    int unreadable = 0;
+    if (startTime(id.pid, &unreadable) != id.began) {
+        if (h.fd >= 0) ::close(h.fd);
+        mRefusal = unreadable ? Refusal::kUnavailable : Refusal::kChanged;
+        mError = unreadable;
         return false;
     }
     mPid = id.pid;
     mBegan = id.began;
-    mFd = fd;   // -1 where the kernel has no pidfds; send() falls back
+    mFd = h.fd;   // -1 only where the kernel has no pidfds; send() falls back
     return true;
 }
 
 bool Signal::openUnproven(pid_t pid) {
     shut();
-    if (pid <= 0) return false;
-    const int fd = openPidfd(pid);
-    const unsigned long long now = startTime(pid);
+    if (pid <= 0) {
+        mRefusal = Refusal::kUnprovable;
+        return false;
+    }
+    const Handle h = openPidfd(pid);
+    if (h.fd < 0 && !h.absent) {
+        mRefusal = h.err == ESRCH ? Refusal::kChanged : Refusal::kUnavailable;
+        mError = h.err;
+        return false;
+    }
+    int unreadable = 0;
+    const unsigned long long now = startTime(pid, &unreadable);
     if (now == 0) {
-        if (fd >= 0) ::close(fd);
+        if (h.fd >= 0) ::close(h.fd);
+        mRefusal = unreadable ? Refusal::kUnavailable : Refusal::kChanged;
+        mError = unreadable;
         return false;
     }
     // Whatever it is, it is pinned from here on: --force means "signal that
@@ -310,23 +398,32 @@ bool Signal::openUnproven(pid_t pid) {
     // round to it".
     mPid = pid;
     mBegan = now;
-    mFd = fd;
+    mFd = h.fd;
     return true;
 }
 
 bool Signal::alive() const {
     if (mPid <= 0) return false;
-    if (mFd >= 0) return sendThroughPidfd(mFd, 0);
+    if (mFd >= 0) return sendThroughPidfd(mFd, 0, nullptr);
     return startTime(mPid) == mBegan;
 }
 
-bool Signal::send(int sig) const {
-    if (mPid <= 0) return false;
-    if (mFd >= 0) return sendThroughPidfd(mFd, sig);
+bool Signal::send(int sig, int* err) const {
+    if (err) *err = 0;
+    if (mPid <= 0) {
+        if (err) *err = ESRCH;
+        return false;
+    }
+    if (mFd >= 0) return sendThroughPidfd(mFd, sig, err);
     // No pidfd. Re-reading the identity immediately before the signal narrows
     // the window rather than closing it, which is the best a pid can do.
-    if (startTime(mPid) != mBegan) return false;
-    return kill(mPid, sig) == 0;
+    if (startTime(mPid) != mBegan) {
+        if (err) *err = ESRCH;
+        return false;
+    }
+    if (kill(mPid, sig) == 0) return true;
+    if (err) *err = errno;
+    return false;
 }
 
 }  // namespace daemon

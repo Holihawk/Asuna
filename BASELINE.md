@@ -280,8 +280,19 @@ Recorded here so they are not mistaken for damage done by a later phase.
    away". Any Phase 3 change must argue against that stated position rather
    than assume it was missed. Note also that `improve.md`'s `pidfd_open`
    suggestion does not work as written: `ext start` and `ext stop` are separate
-   processes, so no pidfd can survive between them. Storing process start-time
-   metadata alongside the pid is the approach that actually closes the hole.
+   processes, so no pidfd can survive between them. ~~Storing process start-time
+   metadata alongside the pid is the approach that actually closes the hole.~~
+
+   **Amended in Phase 3.1.1.** That last sentence was half the answer, and
+   reading it as the whole one would reintroduce the bug it was written about.
+   Start-time metadata is what makes the pid file a *durable* identity, which no
+   pidfd can be. It does not make the *signal* safe on its own: checking the
+   start time and then calling `kill(2)` are two operations, so the recorded
+   helper can exit and its number be reissued between them. Closing that needs
+   both — the file for remembering, and a pidfd opened freshly by whoever is
+   about to signal, which refers to the process rather than to the number. What
+   does not work is only the idea of *persisting* a pidfd between commands. See
+   `daemon::Signal` in `src/app/daemon.hpp`.
 
 6. **Issue #2 has a consequence `improve.md` does not mention.** An empty
    stream is not merely returned as success — `asuna-ext.py:299-305` also

@@ -40,6 +40,13 @@ constexpr int kStartTimeoutMs = 10000;
 constexpr int kTermTimeoutMs = 5000;
 constexpr int kKillTimeoutMs = 2000;
 
+// How the middle process of `ext start`'s double fork reports back. Its exit
+// status is all it has: it is the one process that knows the helper's pid, and
+// everything it does happens on the other side of a fork from the caller.
+constexpr int kStagedOk = 0;
+constexpr int kStagedNoFork = 1;
+constexpr int kStagedNoPidFile = 2;
+
 bool gJson = false;   // --json: print the reply line instead of a summary
 
 int nowMs() {
@@ -813,7 +820,7 @@ int cmdExtStart(const Config& cfg) {
         // not take it with it.
         setsid();
         const pid_t grandchild = fork();
-        if (grandchild < 0) _exit(1);
+        if (grandchild < 0) _exit(kStagedNoFork);
         if (grandchild > 0) {
             // The middle process is the one that knows the surviving pid. It
             // also records when that pid started, which is what stops the file
@@ -826,8 +833,20 @@ int cmdExtStart(const Config& cfg) {
             // ofstream here once left a pid file of exactly zero bytes and an
             // `ext status` that could see the helper on the socket but not in
             // the process table.
-            daemon::writePidFile(paths::extPidPath(), grandchild);
-            _exit(0);
+            //
+            // Nothing else can write that file: the original parent is on the
+            // other side of a fork and never learns this pid, and the grandchild
+            // is about to become somebody else's program. So a failure here
+            // would leave a helper running that only `pgrep` could find - `ext
+            // status` reporting pid 0, `ext stop` with nothing to signal. It is
+            // taken back down instead, and `ext start` fails: the grandchild is
+            // this process's own child and unreaped, so its pid cannot yet have
+            // been reused and SIGKILL cannot reach anybody else.
+            if (!daemon::writePidFile(paths::extPidPath(), grandchild)) {
+                kill(grandchild, SIGKILL);
+                _exit(kStagedNoPidFile);
+            }
+            _exit(kStagedOk);
         }
         std::string error;
         if (!daemon::redirectOutput(paths::extLogPath(), &error)) _exit(1);
@@ -838,8 +857,24 @@ int cmdExtStart(const Config& cfg) {
         fprintf(stderr, "asuna: could not run %s: %s\n", args[0], strerror(errno));
         _exit(127);
     }
-    int ignored = 0;
-    waitpid(child, &ignored, 0);
+    int staged = 0;
+    waitpid(child, &staged, 0);
+    // The middle process's exit status is the only thing it can send back, and
+    // it used to be discarded. A helper the pid file could not name would then
+    // be reported as started, and only stop working later - at the point where
+    // somebody wanted to stop it.
+    switch (WIFEXITED(staged) ? WEXITSTATUS(staged) : -1) {
+        case kStagedOk:
+            break;
+        case kStagedNoFork:
+            return complain("could not fork the helper");
+        case kStagedNoPidFile:
+            return complain("could not write " + paths::extPidPath() +
+                            " - the helper has been stopped again rather than left running"
+                            " under a pid nothing could identify");
+        default:
+            return complain("the helper could not be started");
+    }
 
     // Started is not connected. Wait for it to actually subscribe, because
     // "it launched and then died on an import error" and "it is running" look
@@ -865,6 +900,28 @@ int cmdExtStart(const Config& cfg) {
     return kError;
 }
 
+// The target could not be taken hold of safely, and not because it has gone:
+// the kernel would not open a handle, or /proc could not be read to confirm the
+// identity - out of descriptors, out of memory. Try again is the honest advice,
+// so the pid file is left exactly as it was: removing it would throw away the
+// only record of what to stop, and signalling the bare pid instead would spend a
+// safety property on a temporary shortage, which is when it is needed most.
+int cannotOpen(const daemon::Signal& target, pid_t pid) {
+    return complain("could not get a safe hold on pid " + std::to_string(pid) + ": " +
+                    strerror(target.error()) + " - nothing has been signalled, and " +
+                    paths::extPidPath() + " has been left as it is");
+}
+
+// A signal that did not arrive at a process that is still there. Whatever the
+// reason - permission, resources, a syscall that is not available - the helper
+// is still running, so the file that names it stays: reporting a stop that did
+// not happen *and* deleting the only way to try again is the worst of both.
+int cannotSignal(pid_t pid, int err) {
+    return complain("could not signal pid " + std::to_string(pid) + ": " + strerror(err) +
+                    " - it is still running, so " + paths::extPidPath() +
+                    " has been left as it is");
+}
+
 int cmdExtStop(bool force = false) {
     // Loud here of all places: this is the verb that sends the signal, so a pid
     // file naming somebody else is the exact thing the caller needs told before
@@ -883,7 +940,29 @@ int cmdExtStop(bool force = false) {
     // handle removes that, including for the SIGKILL five seconds later.
     daemon::Signal target;
     if (!target.open(id)) {
-        if (id.state == daemon::Owner::kUnverified && !force) {
+        // *Why* it refused decides what may happen next, and only one of the
+        // three refusals leads anywhere near an unproven signal. Treating them
+        // alike is how a normal stop could still reach a stranger: a proven pid
+        // file whose helper exited in the moment between reading it and opening
+        // it fell through to the forced path, which then pinned - precisely and
+        // safely - whoever had inherited the number.
+        if (target.refusal() == daemon::Signal::Refusal::kUnavailable)
+            return cannotOpen(target, id.pid);
+
+        if (id.state != daemon::Owner::kUnverified) {
+            // The file proved itself when it was read and cannot now: the helper
+            // left in between. It is already stopped, so the file goes - but
+            // nothing is signalled, forced or otherwise, because that pid has
+            // been *shown* to have moved on and --force cannot unshow it.
+            fs::remove(paths::extPidPath(), ec);
+            if (daemon::startTime(id.pid) != 0)
+                fprintf(stderr,
+                        "asuna: the helper left while it was being stopped, and pid %d is now"
+                        " a\n       different process - nothing has been signalled\n",
+                        static_cast<int>(id.pid));
+            return complain("the helper is not running", kOk);
+        }
+        if (!force) {
             // Something is running under that number, and nothing here can show
             // it is the helper: the file predates start times. `status` may be
             // generous about that; this verb may not, because being wrong here
@@ -899,8 +978,12 @@ int cmdExtStop(bool force = false) {
                     static_cast<int>(id.pid));
             return kError;
         }
-        // --force, or a process that ended between reading the file and here.
+        // --force, and only ever on the one identity it is for: a file from a
+        // build that recorded no start time, on a pid that is still live. The
+        // user has said they checked.
         if (!target.openUnproven(id.pid)) {
+            if (target.refusal() == daemon::Signal::Refusal::kUnavailable)
+                return cannotOpen(target, id.pid);
             fs::remove(paths::extPidPath(), ec);
             return complain("the helper is not running", kOk);
         }
@@ -908,13 +991,19 @@ int cmdExtStop(bool force = false) {
                         " her helper\n", static_cast<int>(id.pid));
     }
 
+    // Both results are read. They used to be discarded, so a send that failed
+    // still printed "helper stopped" and still deleted the pid file - the one
+    // outcome where the helper is left running and the only record of it is
+    // thrown away. A send that fails because the target has already gone is a
+    // different matter and really is a stop, which is what `alive()` separates.
     const int pid = static_cast<int>(id.pid);
-    target.send(SIGTERM);
+    int err = 0;
+    if (!target.send(SIGTERM, &err) && target.alive()) return cannotSignal(id.pid, err);
     const int deadline = nowMs() + kTermTimeoutMs;
     while (nowMs() < deadline && target.alive()) usleep(50 * 1000);
     if (target.alive()) {
         fprintf(stderr, "asuna: it ignored SIGTERM; killing pid %d\n", pid);
-        target.send(SIGKILL);
+        if (!target.send(SIGKILL, &err) && target.alive()) return cannotSignal(id.pid, err);
     }
     fs::remove(paths::extPidPath(), ec);
     printf("asuna: helper stopped\n");
@@ -954,13 +1043,36 @@ int cmdExtTest(const Config& cfg) {
 int cmdExt(int argc, char** argv, int from) {
     const std::string verb = from < argc ? argv[from] : "status";
 
-    // `--force` on the two verbs that signal. Only ever means "signal a pid
-    // whose identity the pid file cannot prove"; it does not skip any other
-    // check, and it never applies to a file that has been shown to name
-    // something else.
+    // The verb first, so `ext bogus --force` is answered with the list of verbs
+    // rather than with a complaint about the option. (`--json` never reaches
+    // here: dispatch takes it out of argv, because it says how to print rather
+    // than what to do.)
+    const char* const known[] = {"start", "stop", "restart", "test",
+                                 "status", "config", "cancel"};
+    if (std::none_of(std::begin(known), std::end(known),
+                     [&verb](const char* v) { return verb == v; }))
+        return complain("ext takes start, stop, restart, test, status,"
+                        " config or cancel", kUsage);
+
+    // Then an exact grammar: `ext stop [--force]`, `ext restart [--force]`, and
+    // the bare verb everywhere else. --force is the one option here that can end
+    // a process the CLI was unable to identify, and scanning the whole argument
+    // list for it accepted things that read as if they did something and did
+    // not - `ext status --force`, `ext stop garbage`, both silently fine.
+    //
+    // --force only ever means "signal a pid whose identity the pid file cannot
+    // prove". It skips no other check, and never applies to a file that has been
+    // shown to name something else.
     bool force = false;
-    for (int i = from; i < argc; ++i)
-        if (strcmp(argv[i], "--force") == 0) force = true;
+    for (int i = from + 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg != "--force")
+            return complain("ext " + verb + " does not take '" + arg + "'", kUsage);
+        if (verb != "stop" && verb != "restart")
+            return complain("--force is only for `ext stop` and `ext restart`", kUsage);
+        if (force) return complain("--force is given twice", kUsage);
+        force = true;
+    }
 
     if (verb == "start" || verb == "restart" || verb == "test") {
         Config cfg;
@@ -1042,9 +1154,8 @@ int cmdExt(int argc, char** argv, int from) {
         printf("  persona        %s\n", firstLine(d["persona"].asString()).c_str());
         return kOk;
     }
-    if (verb != "status") return complain("ext takes start, stop, restart, test, status,"
-                                          " config or cancel", kUsage);
-
+    // `status`, by elimination: every other verb returned above, and anything
+    // that is not one of them was refused before any of this ran.
     const pid_t pid = extPid();
     int status = kError;
     Json d;

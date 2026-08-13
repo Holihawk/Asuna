@@ -257,10 +257,21 @@ answer, and treating it as one meant the fallback provider was never reached. Ca
 the one thing that looks the same and is not a failure: it is you, so no provider is blamed
 or skipped for it.
 
-`asuna ext stop` refuses to signal a pid file it cannot prove names the helper — it records
-the process's start time as well as its number, so a recycled pid is recognised rather than
-signalled. A file written by a version before that carried no start time; `stop` says so,
-names the pid, and `--force` is how you say you have checked.
+`asuna ext stop` refuses to signal a pid file it cannot prove names the helper. The file
+records the process's start time as well as its number, so a recycled pid is recognised
+rather than signalled — and the signal itself goes through a handle to that *process*,
+opened at the moment of stopping, so a helper that exits while it is being stopped cannot
+hand its number to a stranger who then receives the signal. A file written by a version
+before any of that carried no start time; `stop` says so, names the pid, and
+`--force` — which only `ext stop` and `ext restart` accept — is how you say you have
+checked. `--force` never applies to a pid the file has been *shown* to have lost: a
+recycled number is not forceable, because there is nothing left to force.
+
+If a stop cannot be carried out — the helper could not be signalled, or the machine was too
+short of file descriptors to make sure of it — nothing is signalled and the pid file is left
+where it is, so the next attempt still knows what to stop. `asuna ext start` reports a
+failure to write that file rather than a successful start, and takes the helper back down:
+one that runs under a number nothing can identify cannot be stopped later.
 
 A provider defined but left out of `providers` is parked, not ignored in silence —
 `asuna ext config` says it is there and unused. `asuna ext test` probes each one with a
@@ -835,8 +846,8 @@ ctest --test-dir build          # 10 suites, no compositor, no GPU, no network
 | `argparse` | what the command line is allowed to say: malformed numbers, boundaries, overflow, and the quoting grammar shared with the Python end |
 | `json` | the shared reader and writer — the RFC 8259 number grammar, control characters in strings, and that everything `quote` writes parses back to itself |
 | `state` | what she remembers between runs, against a temporary `XDG_STATE_HOME` it refuses to run without |
-| `daemon` | whether a pid file still names the process that wrote it, and the refusal to signal one that cannot be proved — what stands between `ext stop` and a stranger who inherited the number |
-| `cli` | the real binary, one command at a time: which bound each flag is given, what `config check` says in each shape, and what the client prints for a reply from a daemon. Nothing here starts a daemon or touches a running one — the daemon-backed cases talk to `tests/fake_daemon.py`, a socket that answers with a canned line and nothing else |
+| `daemon` | whether a pid file still names the process that wrote it, and the refusal to signal one that cannot be proved — what stands between `ext stop` and a stranger who inherited the number. Including *why* each refusal happened: an identity that was never provable may be forced, one shown to have moved on may not, and a `/proc` that could not be read is neither of those but a reason to do nothing at all |
+| `cli` | the real binary, one command at a time: which bound each flag is given, what `config check` says in each shape, what the client prints for a reply from a daemon, and the whole of what `ext stop` will and will not signal. Nothing here starts a daemon or touches a running one — the daemon-backed cases talk to `tests/fake_daemon.py`, a socket that answers with a canned line and nothing else, and the cases that end in a real signal are given a `sleep` of the suite's own to stand in for the helper |
 | `ext` | the helper's provider failover, offline: an empty stream, a dead endpoint, an HTTP status, a stream that dies mid-answer, and cancellation — which is not the endpoint's fault and must not be treated as one |
 
 `ext` runs `tools/asuna-ext.py` with `Provider.request` replaced by canned responses, so it

@@ -85,14 +85,23 @@ long rssKb();
 // for as long as the machine has been up, which is longer than any pid file we
 // write can be meaningful for.
 //
-// pidfd_open was the other candidate and does not fit: a pidfd is a live handle
-// held by a running process, and the thing that has to do the remembering here
-// is a pid file read by a CLI that exits between every command.
+// pidfd_open cannot replace this file, for the reason it is sometimes suggested
+// as a replacement: a pidfd is a live handle held by a running process, and the
+// thing that has to do the remembering here is a pid file read by a CLI that
+// exits between every command. It is still needed, for the other half of the
+// problem - the pid file makes the identity durable, and a pidfd opened freshly
+// by whoever is about to signal makes the target of that signal stable. Neither
+// half is sufficient alone; see Signal.
 
 // Field 22 of /proc/<pid>/stat - when the process started, in clock ticks since
 // boot. 0 if there is no such process or /proc cannot be read, which callers
 // must treat as "cannot verify" rather than as a value to compare.
-unsigned long long startTime(pid_t pid);
+//
+// `unreadable`, if given, separates those two zeros: 0 when there is no such
+// process, and an errno when the entry is there and could not be read - a full
+// descriptor table, most likely. Anyone about to signal has to tell them apart,
+// because comparing the first zero is how "we cannot look" becomes "it is gone".
+unsigned long long startTime(pid_t pid, int* unreadable = nullptr);
 
 // What a pid file turned out to name.
 enum class Owner {
@@ -123,9 +132,26 @@ struct Identity {
 
 // Writes `pid` and its start time to `path`, via a temporary and a rename so a
 // reader can never see half a line. False if it could not be written.
+//
+// Also false if `pid`'s start time cannot be read, rather than writing the
+// one-field record that would produce. kUnverified is there so a helper started
+// before an upgrade is not orphaned by it; it is not somewhere for this build to
+// land when /proc is unreadable, because what it buys is a pid `ext stop` may
+// not signal. Failing here leaves the caller able to decide not to run a helper
+// it could never name.
 bool writePidFile(const std::string& path, pid_t pid);
 
 // Reads `path` and says what it names.
+//
+// Known limitation: a /proc that cannot be read at all - not mounted, or hiding
+// other processes - is reported as kGone, because there is no state here for
+// "cannot tell". `Signal::open` does draw that distinction and refuses rather
+// than guessing, so nothing is ever signalled on the strength of it; the cost is
+// that `ext status` would say the helper had stopped. Fixing it properly means a
+// fifth Owner state and a decision about what `status` should print, which is a
+// design change rather than a correction. The pid file is read and then closed
+// before /proc is opened, so a full descriptor table - the reachable way this
+// used to happen - no longer produces it.
 Identity readPidFile(const std::string& path);
 
 // An open handle to one particular process, for signalling it and nothing else.
@@ -147,6 +173,22 @@ Identity readPidFile(const std::string& path);
 // the pidfd is opened fresh by whoever is about to signal.
 class Signal {
 public:
+    // Why an open was refused. A bare false collapses three situations that a
+    // caller has to answer differently, and the collapse had a consequence: a
+    // proven pid file whose helper exited a moment earlier looked exactly like
+    // one too old to prove anything, so a plain `ext stop` fell through to the
+    // forced path and signalled whoever had inherited the number.
+    enum class Refusal {
+        kNone,         // nothing was refused
+        kUnprovable,   // the identity never named a process it could prove:
+                       // kUnverified, or a record with no start time in it
+        kChanged,      // it did, and that process has since left - its pid may
+                       // now be somebody else's, so nothing here may be signalled
+        kUnavailable,  // the kernel has pidfds and would not give us one, for a
+                       // reason of its own that `error()` carries. Not "the
+                       // process is gone", and not grounds to fall back
+    };
+
     ~Signal();
     Signal() = default;
     Signal(const Signal&) = delete;
@@ -161,16 +203,33 @@ public:
     // The same for a pid whose identity cannot be proven - an old pid file, and
     // only ever because the user said so in as many words. Its own name so that
     // every place we signal without proof is one grep away.
+    //
+    // For kUnverified and nothing else. A kChanged identity must never arrive
+    // here: it has been *shown* to name a process that is gone, which is the
+    // one thing --force cannot make true again.
     bool openUnproven(pid_t pid);
+
+    // Why the last open returned false, and the errno behind kUnavailable (0
+    // otherwise). Both are reset by the next open.
+    Refusal refusal() const { return mRefusal; }
+    int error() const { return mError; }
 
     // Still the process that was opened, rather than "some process has this
     // number". False once it has exited, even if the pid has been reused.
     bool alive() const;
-    bool send(int sig) const;
+
+    // `err`, if given, gets the errno behind a false - ESRCH for a target that
+    // has gone, which a caller may reasonably treat as already stopped, and
+    // anything else for a failure that leaves it running.
+    bool send(int sig, int* err = nullptr) const;
 
     // False on a kernel without pidfds, where `send` falls back to re-reading
     // the start time immediately before kill(2) - narrower than no check at
     // all, and not atomic. Reported so a test can tell which path it exercised.
+    //
+    // Only ever the absence of the syscall, never a pidfd_open that failed: a
+    // safety property that quietly weakens when descriptors run short is absent
+    // exactly when something is going wrong. Those refuse to open at all.
     bool exact() const { return mFd >= 0; }
 
 private:
@@ -179,6 +238,8 @@ private:
     pid_t mPid = 0;
     unsigned long long mBegan = 0;
     int mFd = -1;
+    Refusal mRefusal = Refusal::kNone;
+    int mError = 0;
 };
 
 }  // namespace daemon
