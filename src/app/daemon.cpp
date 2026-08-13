@@ -443,10 +443,6 @@ Signal::Presence Signal::probe(int* err) const {
     return Presence::kAlive;
 }
 
-bool Signal::alive() const {
-    return probe() == Presence::kAlive;
-}
-
 bool Signal::send(int sig, int* err) const {
     if (err) *err = 0;
     if (mPid <= 0) {

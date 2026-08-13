@@ -232,10 +232,6 @@ public:
     // silently becoming gone.
     Presence probe(int* err = nullptr) const;
 
-    // Convenience for callers that need only a display hint. A signalling
-    // decision must use probe(), because false also includes "cannot tell".
-    bool alive() const;
-
     // `err`, if given, gets the errno behind a false - ESRCH for a target that
     // has gone, which a caller may reasonably treat as already stopped, and
     // anything else for a failure that leaves it running.

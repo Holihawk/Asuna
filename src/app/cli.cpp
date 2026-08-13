@@ -968,6 +968,15 @@ int cannotSignal(pid_t pid, int err) {
                     " has been left as it is");
 }
 
+// The signal was delivered, but the later liveness check itself failed. Keep
+// this separate from cannotSignal(): saying the signal failed here sends the
+// operator looking at the wrong syscall and hides the state we actually know.
+int cannotConfirmStopped(pid_t pid, int err) {
+    return complain("could not confirm whether pid " + std::to_string(pid) + " stopped: " +
+                    strerror(err) + " - " + paths::extPidPath() +
+                    " has been left as it is");
+}
+
 int stillAlive(pid_t pid) {
     return complain("pid " + std::to_string(pid) + " is still present after SIGKILL - " +
                     paths::extPidPath() + " has been left as it is");
@@ -1062,7 +1071,7 @@ int cmdExtStop(bool force = false) {
         usleep(50 * 1000);
     }
     if (present == daemon::Signal::Presence::kUnavailable)
-        return cannotSignal(id.pid, err);
+        return cannotConfirmStopped(id.pid, err);
     if (present == daemon::Signal::Presence::kAlive) {
         fprintf(stderr, "asuna: it ignored SIGTERM; killing pid %d\n", pid);
         if (!target.send(SIGKILL, &err)) {
@@ -1078,7 +1087,7 @@ int cmdExtStop(bool force = false) {
             usleep(50 * 1000);
         }
         if (present == daemon::Signal::Presence::kUnavailable)
-            return cannotSignal(id.pid, err);
+            return cannotConfirmStopped(id.pid, err);
         if (present == daemon::Signal::Presence::kAlive) return stillAlive(id.pid);
     }
     fs::remove(paths::extPidPath(), ec);
