@@ -6,16 +6,9 @@
 #include <string>
 #include <vector>
 
-namespace asuna {
+#include "app/bubble_timing.hpp"
 
-// How long a line stays up: base + perGlyph x its length, capped at max.
-// Counted in codepoints rather than bytes - every line in the dialogue file is
-// Chinese, where a byte count would triple the duration.
-struct BubbleTiming {
-    double base = 2.0;
-    double perGlyph = 0.20;
-    double max = 9.0;
-};
+namespace asuna {
 
 // The speech bubble.
 //

@@ -50,6 +50,7 @@ add_executable(asuna
   src/app/argparse.cpp
   src/app/cli.cpp
   src/app/config.cpp
+  src/app/config_apply.cpp
   src/app/daemon.cpp
   src/app/ipc.cpp
   src/app/state.cpp
@@ -108,10 +109,27 @@ add_executable(asuna-ipc-test
 target_include_directories(asuna-ipc-test PRIVATE src)
 target_link_libraries(asuna-ipc-test PRIVATE PkgConfig::GLIB)
 
-# The config file. Config::applyTo lives in ui/shell.cpp precisely so this can be
-# a parser test rather than a GTK one.
+# Dependency direction: app value types and parser interfaces must not include
+# ui/. The UI may consume app/, pet/ and character/; app mapping may consume
+# GTK-free character value types. The targets below enforce the important part:
+# parser-only and public app-header checks receive only -Isrc, never GTK flags.
+#
+# Config parsing remains its own leaf. Config::applyTo is intentionally absent:
+# it lives in a separate GTK-free TU so this target need not link mapping code.
 add_executable(asuna-config-test tests/config_test.cpp src/app/config.cpp src/paths.cpp)
 target_include_directories(asuna-config-test PRIVATE src)
+
+# Config-to-options mapping has its own test and TU. This proves mapping remains
+# owned by app/config without making the parser suite depend on it or on GTK.
+add_executable(asuna-config-apply-test
+  tests/config_apply_test.cpp src/app/config_apply.cpp src/app/config.cpp src/paths.cpp)
+target_include_directories(asuna-config-apply-test PRIVATE src)
+
+# Compile-only boundary guard for public application headers. It deliberately
+# receives no GTK/GLib imported targets or include flags; an app -> ui include
+# therefore breaks the ordinary build at compile time.
+add_library(asuna-app-headers-test OBJECT tests/app_headers_test.cpp)
+target_include_directories(asuna-app-headers-test PRIVATE src)
 
 # What the command line is allowed to say. A leaf with no dependencies at all -
 # not even paths - so the boundary and overflow cases cost nothing to run.
@@ -143,6 +161,7 @@ enable_testing()
 add_test(NAME motion COMMAND asuna-motion-test)
 add_test(NAME ipc COMMAND asuna-ipc-test)
 add_test(NAME config COMMAND asuna-config-test)
+add_test(NAME config_apply COMMAND asuna-config-apply-test)
 add_test(NAME argparse COMMAND asuna-argparse-test)
 add_test(NAME json COMMAND asuna-json-test)
 add_test(NAME state COMMAND asuna-state-test)
