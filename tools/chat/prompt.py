@@ -144,6 +144,7 @@ class Prompt:
         self.frame: Gtk.Box
         self.surface = None
         self.drag_moved = False
+        self.reset_pending = False
 
     def build(self, app):
         window = Gtk.ApplicationWindow(application=app)
@@ -412,8 +413,17 @@ class Prompt:
             self.report_position()
 
     def on_handle_released(self, _gesture, n_press, _x, _y):
-        if n_press == 2 and not self.drag_moved:
-            self.reset_position()
+        if n_press == 2 and not self.drag_moved and not self.reset_pending:
+            # GtkGestureClick and GtkGestureDrag observe the same sequence.
+            # Defer until GTK has delivered the drag-end/click notifications;
+            # otherwise drag-end can immediately overwrite the reset position.
+            self.reset_pending = True
+            GLib.idle_add(self._reset_when_idle)
+
+    def _reset_when_idle(self):
+        self.reset_pending = False
+        self.reset_position()
+        return GLib.SOURCE_REMOVE
 
     def reset_position(self):
         """Return to the pet's current anchor and release the process-local pin."""
