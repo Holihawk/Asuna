@@ -77,6 +77,13 @@ class Helper:
         self.chat = None
         self.next_glance = None
         self.prompt = None   # the prompt process, while one is open
+        # Chat requests are edge-triggered. Keep at most one initial request
+        # and, after an answer, one follow-up invitation; repeated menu/CLI
+        # activations must not turn into a queue of future prompts.
+        self.chat_lock = threading.Lock()
+        self.chat_active = False
+        self.chat_followups_open = False
+        self.chat_followup_pending = False
         # Absolute logical coordinates within the prompt's output. This belongs
         # to the helper rather than state.json: restarting (or reloading) the
         # helper deliberately restores the daemon-chosen placement.
@@ -280,6 +287,7 @@ class Helper:
         # Anything that arrived while the answer was being written is not an
         # invitation - a poke during an answer is a poke at the answer - so the
         # backlog is cleared before the window opens.
+        pending_chat = None
         while True:
             try:
                 stale = self.events.get_nowait()
@@ -290,6 +298,16 @@ class Helper:
                 return None
             if stale.get("event") == "config":
                 self.load_config()
+            elif stale.get("event") == "chat":
+                if pending_chat is None:
+                    pending_chat = stale
+                continue
+
+        if pending_chat is not None:
+            with self.chat_lock:
+                self.chat_followup_pending = False
+                self.chat_followups_open = False
+            return pending_chat.get("text", "")
 
         deadline = time.time() + FOLLOW_UP_WINDOW
         while self.running and time.time() < deadline:
@@ -304,6 +322,9 @@ class Helper:
             if name == "touch":
                 return ""
             if name == "chat":
+                with self.chat_lock:
+                    self.chat_followup_pending = False
+                    self.chat_followups_open = False
                 return event.get("text", "")
             if name == "config":
                 self.load_config()
@@ -321,36 +342,53 @@ class Helper:
             log("no provider configured, so there is nothing to answer with")
             return
         text, answered = first, False
-        while self.running:
-            if not text and answered:
-                text = self.wait_to_be_asked()
-                if text is None:
+        with self.chat_lock:
+            self.chat_followups_open = False
+        try:
+            while self.running:
+                if not text and answered:
+                    with self.chat_lock:
+                        self.chat_followups_open = True
+                    text = self.wait_to_be_asked()
+                    if text is None:
+                        break
+                if not text:
+                    with self.chat_lock:
+                        # A dismissed follow-up invitation opens the Prompt;
+                        # while it is open, further chat events are duplicates.
+                        self.chat_followups_open = False
+                    try:
+                        text = self.ask_the_user(
+                            placeholder="Continue…" if answered else "Type a message…")
+                    except (IOError, OSError) as e:
+                        log("prompt:", e)
+                        return
+                if not text:
                     break
-            if not text:
+                with self.chat_lock:
+                    self.chat_followups_open = False
+                    self.chat_followup_pending = False
+                self.cancelled.clear()
+                log("asked:", text[:80])
                 try:
-                    text = self.ask_the_user(
-                        placeholder="Continue…" if answered else "Type a message…")
-                except (IOError, OSError) as e:
-                    log("prompt:", e)
-                    return
-            if not text:
-                break
-            self.cancelled.clear()
-            log("asked:", text[:80])
-            try:
-                self.stream_into_bubble(self.chat.ask(text, self.cancelled))
-                answered = True
-            except (urllib.error.URLError, IOError, OSError) as e:
-                # Not necessarily the endpoint: `say` fails too if she has been
-                # hidden or has left since the question was asked, and calling
-                # that a connection problem would send someone looking in the
-                # wrong place. The log gets what actually happened.
-                log("could not answer:", e)
-                self.say_plainly("唔……我这边连不上，等一下再试试？")
-                break
-            text = ""
-        self.chat.forget()
-        log("conversation over, history dropped")
+                    self.stream_into_bubble(self.chat.ask(text, self.cancelled))
+                    answered = True
+                except (urllib.error.URLError, IOError, OSError) as e:
+                    # Not necessarily the endpoint: `say` fails too if she has been
+                    # hidden or has left since the question was asked, and calling
+                    # that a connection problem would send someone looking in the
+                    # wrong place. The log gets what actually happened.
+                    log("could not answer:", e)
+                    self.say_plainly("唔……我这边连不上，等一下再试试？")
+                    break
+                text = ""
+        finally:
+            with self.chat_lock:
+                self.chat_active = False
+                self.chat_followups_open = False
+                self.chat_followup_pending = False
+            self.chat.forget()
+            log("conversation over, history dropped")
 
     def glance(self):
         """One remark about what is on screen, with consent either side of it.
@@ -415,6 +453,13 @@ class Helper:
     # -- the loop -----------------------------------------------------------
 
     def subscriber(self):
+        # Some embedders/tests construct a Helper without __init__; retain the
+        # subscriber's historical lightweight contract in that case.
+        if not hasattr(self, "chat_lock"):
+            self.chat_lock = threading.Lock()
+            self.chat_active = False
+            self.chat_followups_open = False
+            self.chat_followup_pending = False
         try:
             for event in self.control.events():
                 # Cancellation is acted on *here*, in this thread, rather than
@@ -427,6 +472,19 @@ class Helper:
                 # here, which is exactly why the cancel flag is one.
                 if event.get("event") == "cancel":
                     self.cancelled.set()
+                if event.get("event") == "chat":
+                    with self.chat_lock:
+                        # The first request starts the conversation. While its
+                        # prompt/answer is active, or after one follow-up has
+                        # already been queued, duplicate activations are noise.
+                        if self.chat_active and not (
+                                self.chat_followups_open and
+                                not self.chat_followup_pending):
+                            continue
+                        if self.chat_active:
+                            self.chat_followup_pending = True
+                        else:
+                            self.chat_active = True
                 self.events.put(event)
         except OSError as e:
             if self.running:
