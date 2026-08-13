@@ -476,6 +476,17 @@ killed_by_term() {
     fi
 }
 
+killed_by_kill() {
+    checks=$((checks + 1))
+    wait "$1" 2>/dev/null
+    left=$?
+    if [ "$left" != 137 ]; then
+        printf '  FAIL the stubborn helper (pid %s) left with %s, wanted 137 (SIGKILL)\n' \
+            "$1" "$left"
+        failures=$((failures + 1))
+    fi
+}
+
 # gone_pidfile <what this was>: a stop that stopped something removes the file.
 gone_pidfile() {
     checks=$((checks + 1))
@@ -517,6 +528,20 @@ printf '%d %s\n' "$SLEEPER" "$(started_at "$SLEEPER")" > "$FAKEDIR/asuna/ext.pid
 run_fake 0 "helper stopped" ext stop
 killed_by_term "$SLEEPER"
 gone_pidfile "a proven stop"
+
+echo "ext stop: a helper that ignores SIGTERM is confirmed gone after SIGKILL"
+# The stop path waits five seconds before escalating. The important second half
+# is that success is not printed and the pid file is not removed until the
+# pidfd reports the process has actually exited. This child stays unreaped by
+# this shell during `run_fake`, so a signal-0 probe would incorrectly call its
+# zombie alive and time out; poll(pidfd) reports the exit correctly.
+python3 -c 'import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.pause()' &
+STUBBORN=$!
+command sleep 0.05
+printf '%d %s\n' "$STUBBORN" "$(started_at "$STUBBORN")" > "$FAKEDIR/asuna/ext.pid"
+run_fake 0 "helper stopped" ext stop
+killed_by_kill "$STUBBORN"
+gone_pidfile "a SIGKILL stop confirmed through its pidfd"
 
 echo "ext stop --force: the one identity it is for, and it does signal it"
 # One field, so nothing can prove what it names - the upgrade case. Refused
@@ -600,10 +625,14 @@ rm -f "$FAKEDIR/asuna/ext.pid"
 # all. Both halves are checked here: that the failure is reported, and that the
 # helper is taken back down rather than left running under a name nothing has.
 #
-# The stand-in helper is `sleep 314159`, launched through `[ext] command`. The
-# argument is distinctive so that looking for strays cannot match anything else
-# on the machine, and long enough that a leaked one would be obvious.
+# The stand-in helper writes an exec marker and then becomes `sleep 314159`.
+# The argument is distinctive so that looking for strays cannot match anything
+# else on the machine, and long enough that a leaked one would be obvious.
 MARKER="sleep 314159"
+EXEC_MARKER="$FAKEDIR/helper-execed"
+HELPER="$FAKEDIR/helper.sh"
+printf '%s\n' '#!/bin/sh' ': > "$1"' 'exec sleep 314159' > "$HELPER"
+chmod +x "$HELPER"
 
 # no_stray <what this was>: nothing of ours is still running.
 no_stray() {
@@ -619,21 +648,27 @@ no_stray() {
     fi
 }
 
-write_config '[ext]' 'enabled = true' "command = \"$MARKER\"" 'providers = ["x"]' \
+write_config '[ext]' 'enabled = true' "command = \"$HELPER $EXEC_MARKER\"" 'providers = ["x"]' \
     '[ext.provider.x]' 'base_url = "https://example.invalid/v1"' 'model = "m"'
 
 echo "ext start: a helper it could not record is not left running"
 # The write is made to fail with a *directory* where the pid file goes: the
-# temporary is written normally and the rename onto it cannot succeed. Everything
-# before that behaves exactly as usual - the log is opened, the helper is exec'd -
-# which is what makes this the case the old code reported as a success.
+# temporary is written normally and the rename onto it cannot succeed. The
+# helper waits behind the startup gate until that rename succeeds, so this also
+# proves a failed identity write never releases the configured program to exec.
 start_fake '{"ok":true,"data":{"subscribers":1,"enabled":true,"vision_enabled":false}}' || exit 1
+rm -f "$EXEC_MARKER"
 rm -f "$FAKEDIR/asuna/ext.pid"
 mkdir -p "$FAKEDIR/asuna/ext.pid"
 run_fake 1 "could not write" ext start
 rmdir "$FAKEDIR/asuna/ext.pid" 2>/dev/null
 rm -f "$FAKEDIR/asuna/ext.pid.tmp"
 no_stray "a start that could not write its pid file"
+checks=$((checks + 1))
+if [ -e "$EXEC_MARKER" ]; then
+    printf '  FAIL a failed pid-file write released the configured helper to exec\n'
+    failures=$((failures + 1))
+fi
 
 echo "ext start: and the ordinary path still starts one and records it"
 # The other side of the same change: propagating the failure must not have made
@@ -643,6 +678,11 @@ echo "ext start: and the ordinary path still starts one and records it"
 rm -f "$FAKEDIR/asuna/ext.pid"
 run_fake 0 "helper running" ext start
 kept_pidfile "a helper that started"
+checks=$((checks + 1))
+if [ ! -e "$EXEC_MARKER" ]; then
+    printf '  FAIL a successful pid-file write did not release the configured helper\n'
+    failures=$((failures + 1))
+fi
 run_fake 0 "helper stopped" ext stop
 gone_pidfile "a stop after a real start"
 no_stray "a start followed by a stop"

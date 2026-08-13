@@ -189,6 +189,16 @@ public:
                        // process is gone", and not grounds to fall back
     };
 
+    // The result of asking whether the process held by this object has exited.
+    // A boolean cannot distinguish "gone" from "the kernel would not let us
+    // ask", and only the former is grounds for reporting a successful stop and
+    // removing the pid file.
+    enum class Presence {
+        kAlive,
+        kGone,
+        kUnavailable,
+    };
+
     ~Signal();
     Signal() = default;
     Signal(const Signal&) = delete;
@@ -215,7 +225,15 @@ public:
     int error() const { return mError; }
 
     // Still the process that was opened, rather than "some process has this
-    // number". False once it has exited, even if the pid has been reused.
+    // number". A pidfd is polled for exit rather than sent signal 0, which both
+    // recognises an exited zombie and avoids repeating signal-permission checks.
+    // `err` carries the operational error for kUnavailable and ESRCH for kGone.
+    // On the pid fallback, an unreadable /proc is unavailable rather than
+    // silently becoming gone.
+    Presence probe(int* err = nullptr) const;
+
+    // Convenience for callers that need only a display hint. A signalling
+    // decision must use probe(), because false also includes "cannot tell".
     bool alive() const;
 
     // `err`, if given, gets the errno behind a false - ESRCH for a target that

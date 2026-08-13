@@ -46,6 +46,8 @@ constexpr int kKillTimeoutMs = 2000;
 constexpr int kStagedOk = 0;
 constexpr int kStagedNoFork = 1;
 constexpr int kStagedNoPidFile = 2;
+constexpr int kStagedCleanupFailed = 3;
+constexpr int kStagedNoGate = 4;
 
 bool gJson = false;   // --json: print the reply line instead of a summary
 
@@ -819,9 +821,16 @@ int cmdExtStart(const Config& cfg) {
         // in this terminal should own the helper, and the terminal closing must
         // not take it with it.
         setsid();
+        int gate[2];
+        if (pipe2(gate, O_CLOEXEC) != 0) _exit(kStagedNoGate);
         const pid_t grandchild = fork();
-        if (grandchild < 0) _exit(kStagedNoFork);
+        if (grandchild < 0) {
+            close(gate[0]);
+            close(gate[1]);
+            _exit(kStagedNoFork);
+        }
         if (grandchild > 0) {
+            close(gate[0]);
             // The middle process is the one that knows the surviving pid. It
             // also records when that pid started, which is what stops the file
             // from naming a stranger later; the write goes through a temporary
@@ -835,19 +844,49 @@ int cmdExtStart(const Config& cfg) {
             // the process table.
             //
             // Nothing else can write that file: the original parent is on the
-            // other side of a fork and never learns this pid, and the grandchild
-            // is about to become somebody else's program. So a failure here
-            // would leave a helper running that only `pgrep` could find - `ext
-            // status` reporting pid 0, `ext stop` with nothing to signal. It is
-            // taken back down instead, and `ext start` fails: the grandchild is
-            // this process's own child and unreaped, so its pid cannot yet have
-            // been reused and SIGKILL cannot reach anybody else.
+            // other side of a fork and never learns this pid. The grandchild
+            // waits behind `gate` and cannot exec the configured program until
+            // the identity is durable. Closing the gate without a byte makes it
+            // exit, so failure is transactional without trying to kill an
+            // external program that may already have changed its credentials.
             if (!daemon::writePidFile(paths::extPidPath(), grandchild)) {
-                kill(grandchild, SIGKILL);
+                close(gate[1]);
+                int stopped = 0;
+                while (waitpid(grandchild, &stopped, 0) < 0) {
+                    if (errno == EINTR) continue;
+                    if (errno != ECHILD) _exit(kStagedCleanupFailed);
+                    break;
+                }
                 _exit(kStagedNoPidFile);
+            }
+            // A child that failed before reading the gate closes its end. Keep
+            // EPIPE as an ordinary error so the pid file is removed below;
+            // default SIGPIPE would terminate this middle process first and
+            // leave a durable identity for a helper that never started.
+            signal(SIGPIPE, SIG_IGN);
+            const char go = 1;
+            ssize_t sent = 0;
+            do {
+                sent = write(gate[1], &go, sizeof(go));
+            } while (sent < 0 && errno == EINTR);
+            close(gate[1]);
+            if (sent != sizeof(go)) {
+                std::error_code ec;
+                fs::remove(paths::extPidPath(), ec);
+                int stopped = 0;
+                while (waitpid(grandchild, &stopped, 0) < 0 && errno == EINTR) {}
+                _exit(kStagedCleanupFailed);
             }
             _exit(kStagedOk);
         }
+        close(gate[1]);
+        char go = 0;
+        ssize_t received = 0;
+        do {
+            received = read(gate[0], &go, sizeof(go));
+        } while (received < 0 && errno == EINTR);
+        close(gate[0]);
+        if (received != sizeof(go) || go != 1) _exit(1);
         std::string error;
         if (!daemon::redirectOutput(paths::extLogPath(), &error)) _exit(1);
         std::vector<char*> args;
@@ -858,7 +897,10 @@ int cmdExtStart(const Config& cfg) {
         _exit(127);
     }
     int staged = 0;
-    waitpid(child, &staged, 0);
+    while (waitpid(child, &staged, 0) < 0) {
+        if (errno == EINTR) continue;
+        return complain(std::string("could not wait for helper startup: ") + strerror(errno));
+    }
     // The middle process's exit status is the only thing it can send back, and
     // it used to be discarded. A helper the pid file could not name would then
     // be reported as started, and only stop working later - at the point where
@@ -872,6 +914,10 @@ int cmdExtStart(const Config& cfg) {
             return complain("could not write " + paths::extPidPath() +
                             " - the helper has been stopped again rather than left running"
                             " under a pid nothing could identify");
+        case kStagedCleanupFailed:
+            return complain("could not release the helper startup gate or confirm cleanup");
+        case kStagedNoGate:
+            return complain("could not create the helper startup gate");
         default:
             return complain("the helper could not be started");
     }
@@ -918,8 +964,13 @@ int cannotOpen(const daemon::Signal& target, pid_t pid) {
 // not happen *and* deleting the only way to try again is the worst of both.
 int cannotSignal(pid_t pid, int err) {
     return complain("could not signal pid " + std::to_string(pid) + ": " + strerror(err) +
-                    " - it is still running, so " + paths::extPidPath() +
+                    " - it could not be confirmed stopped, so " + paths::extPidPath() +
                     " has been left as it is");
+}
+
+int stillAlive(pid_t pid) {
+    return complain("pid " + std::to_string(pid) + " is still present after SIGKILL - " +
+                    paths::extPidPath() + " has been left as it is");
 }
 
 int cmdExtStop(bool force = false) {
@@ -995,15 +1046,40 @@ int cmdExtStop(bool force = false) {
     // still printed "helper stopped" and still deleted the pid file - the one
     // outcome where the helper is left running and the only record of it is
     // thrown away. A send that fails because the target has already gone is a
-    // different matter and really is a stop, which is what `alive()` separates.
+    // different matter and really is a stop, which is what `probe()` separates.
     const int pid = static_cast<int>(id.pid);
     int err = 0;
-    if (!target.send(SIGTERM, &err) && target.alive()) return cannotSignal(id.pid, err);
+    if (!target.send(SIGTERM, &err)) {
+        int probeError = 0;
+        if (target.probe(&probeError) != daemon::Signal::Presence::kGone)
+            return cannotSignal(id.pid, err ? err : probeError);
+    }
     const int deadline = nowMs() + kTermTimeoutMs;
-    while (nowMs() < deadline && target.alive()) usleep(50 * 1000);
-    if (target.alive()) {
+    daemon::Signal::Presence present = daemon::Signal::Presence::kAlive;
+    while (nowMs() < deadline) {
+        present = target.probe(&err);
+        if (present != daemon::Signal::Presence::kAlive) break;
+        usleep(50 * 1000);
+    }
+    if (present == daemon::Signal::Presence::kUnavailable)
+        return cannotSignal(id.pid, err);
+    if (present == daemon::Signal::Presence::kAlive) {
         fprintf(stderr, "asuna: it ignored SIGTERM; killing pid %d\n", pid);
-        if (!target.send(SIGKILL, &err) && target.alive()) return cannotSignal(id.pid, err);
+        if (!target.send(SIGKILL, &err)) {
+            int probeError = 0;
+            if (target.probe(&probeError) != daemon::Signal::Presence::kGone)
+                return cannotSignal(id.pid, err ? err : probeError);
+        }
+
+        const int killDeadline = nowMs() + kKillTimeoutMs;
+        while (nowMs() < killDeadline) {
+            present = target.probe(&err);
+            if (present != daemon::Signal::Presence::kAlive) break;
+            usleep(50 * 1000);
+        }
+        if (present == daemon::Signal::Presence::kUnavailable)
+            return cannotSignal(id.pid, err);
+        if (present == daemon::Signal::Presence::kAlive) return stillAlive(id.pid);
     }
     fs::remove(paths::extPidPath(), ec);
     printf("asuna: helper stopped\n");

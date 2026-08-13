@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
+#include <poll.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/file.h>
@@ -402,10 +403,48 @@ bool Signal::openUnproven(pid_t pid) {
     return true;
 }
 
+Signal::Presence Signal::probe(int* err) const {
+    if (err) *err = 0;
+    if (mPid <= 0) {
+        if (err) *err = ESRCH;
+        return Presence::kGone;
+    }
+    if (mFd >= 0) {
+        // A pidfd becomes readable when its process exits, including while the
+        // process is a zombie waiting for its parent to reap it. Signal 0 does
+        // not have that property on every kernel and also repeats the signal
+        // permission check, so it can turn EPERM into "cannot tell whether the
+        // target survived" immediately after a failed real signal.
+        pollfd watched{mFd, POLLIN, 0};
+        int ready = 0;
+        do {
+            ready = ::poll(&watched, 1, 0);
+        } while (ready < 0 && errno == EINTR);
+        if (ready == 0) return Presence::kAlive;
+        if (ready > 0 && (watched.revents & POLLIN)) {
+            if (err) *err = ESRCH;
+            return Presence::kGone;
+        }
+        const int why = ready < 0 ? errno : EIO;
+        if (err) *err = why;
+        return Presence::kUnavailable;
+    }
+
+    int unreadable = 0;
+    const unsigned long long now = startTime(mPid, &unreadable);
+    if (unreadable) {
+        if (err) *err = unreadable;
+        return Presence::kUnavailable;
+    }
+    if (now != mBegan) {
+        if (err) *err = ESRCH;
+        return Presence::kGone;
+    }
+    return Presence::kAlive;
+}
+
 bool Signal::alive() const {
-    if (mPid <= 0) return false;
-    if (mFd >= 0) return sendThroughPidfd(mFd, 0, nullptr);
-    return startTime(mPid) == mBegan;
+    return probe() == Presence::kAlive;
 }
 
 bool Signal::send(int sig, int* err) const {
@@ -417,7 +456,12 @@ bool Signal::send(int sig, int* err) const {
     if (mFd >= 0) return sendThroughPidfd(mFd, sig, err);
     // No pidfd. Re-reading the identity immediately before the signal narrows
     // the window rather than closing it, which is the best a pid can do.
-    if (startTime(mPid) != mBegan) {
+    int unreadable = 0;
+    if (startTime(mPid, &unreadable) != mBegan) {
+        if (unreadable) {
+            if (err) *err = unreadable;
+            return false;
+        }
         if (err) *err = ESRCH;
         return false;
     }

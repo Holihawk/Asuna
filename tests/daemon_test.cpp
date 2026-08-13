@@ -400,6 +400,68 @@ void aHandleToADeadProcessSignalsNobody() {
     CHECK(err == ESRCH);
 }
 
+void aSignalPermissionFailureDoesNotMeanTheProcessIsGone() {
+    // PID 1 normally belongs to another uid in an ordinary test run. Signal 0
+    // is harmless but performs the same permission check as a real signal: the
+    // send returns EPERM while poll(pidfd) still says the process is alive. The
+    // old boolean alive() repeated signal 0, got the same EPERM, called that
+    // false, and let the CLI report a successful stop and delete its pid file.
+    const unsigned long long began = asuna::daemon::startTime(1);
+    if (began == 0) {
+        printf("  (skipped: pid 1 is not visible through /proc)\n");
+        return;
+    }
+    asuna::daemon::Identity init;
+    init.pid = 1;
+    init.began = began;
+    init.state = asuna::daemon::Owner::kAlive;
+
+    asuna::daemon::Signal target;
+    if (!target.open(init)) {
+        printf("  (skipped: pid 1 cannot be opened here)\n");
+        return;
+    }
+    int err = 0;
+    if (target.send(0, &err)) {
+        // Root or a container with a same-uid init is allowed to probe it. No
+        // signal is delivered by signal 0, so this branch remains harmless.
+        printf("  (skipped: this user may signal pid 1)\n");
+        return;
+    }
+    CHECK(err == EPERM);
+    CHECK(target.probe(&err) == asuna::daemon::Signal::Presence::kAlive);
+    CHECK(err == 0);
+    CHECK(target.alive());
+}
+
+void anExitedZombieIsGoneBeforeItsParentReapsIt() {
+    // pidfd_send_signal(fd, 0) can still succeed for a zombie. That is not an
+    // alive helper: it has exited and only its bookkeeping remains until the
+    // parent waits. poll(pidfd) is the kernel interface that distinguishes the
+    // two, and `ext stop` relies on it before deleting the identity file.
+    const pid_t child = sleeper();
+    CHECK(asuna::daemon::writePidFile(pidFile().string(), child));
+    const asuna::daemon::Identity id = asuna::daemon::readPidFile(pidFile().string());
+
+    asuna::daemon::Signal target;
+    CHECK(target.open(id));
+    CHECK(target.send(SIGKILL));
+
+    asuna::daemon::Signal::Presence present = asuna::daemon::Signal::Presence::kAlive;
+    for (int i = 0; i < 100 && present == asuna::daemon::Signal::Presence::kAlive; ++i) {
+        usleep(10 * 1000);
+        present = target.probe();
+    }
+    // Deliberately before waitpid(): the process is an unreaped zombie here.
+    CHECK(present == asuna::daemon::Signal::Presence::kGone);
+    CHECK(!target.alive());
+
+    int status = 0;
+    waitpid(child, &status, 0);
+    CHECK(WIFSIGNALED(status));
+    CHECK(WTERMSIG(status) == SIGKILL);
+}
+
 void aPidNothingCanBeNamedInIsNotWritten() {
     // A pid with no /proc entry: nothing to record a start time from. The file
     // that would be written is the old one-field format, which `ext stop` may
@@ -460,6 +522,8 @@ int main() {
         {"aHandleRefusesAnIdentityThatDoesNotMatch", aHandleRefusesAnIdentityThatDoesNotMatch},
         {"aProcessThatHasGoneIsNotAKernelWithoutPidfds", aProcessThatHasGoneIsNotAKernelWithoutPidfds},
         {"aHandleToADeadProcessSignalsNobody", aHandleToADeadProcessSignalsNobody},
+        {"aSignalPermissionFailureDoesNotMeanTheProcessIsGone", aSignalPermissionFailureDoesNotMeanTheProcessIsGone},
+        {"anExitedZombieIsGoneBeforeItsParentReapsIt", anExitedZombieIsGoneBeforeItsParentReapsIt},
         {"aPidNothingCanBeNamedInIsNotWritten", aPidNothingCanBeNamedInIsNotWritten},
         {"aProcessWithAnAwkwardNameIsStillReadable", aProcessWithAnAwkwardNameIsStillReadable},
     };
