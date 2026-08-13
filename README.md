@@ -563,15 +563,32 @@ layer — all four directories use them.
 
 ```
 src/
-  main.cpp             dispatch: hands the daemon half to app/cli.cpp
+  main.cpp             dispatch: hands the daemon half to app/cli/dispatch.cpp
   json.{cpp,hpp}       a small read-only JSON reader
   paths.{cpp,hpp}      XDG dirs; find models/ and data/ without a cwd
 
   app/                 the process and its interfaces
-    cli.{cpp,hpp}      every verb; the client half never touches GTK
+    cli.hpp            public CLI boundary; the client half never touches GTK
+    argparse.{cpp,hpp} strict numeric and quoted-command parsing
+    options.hpp        GTK-free values shared by config and the CLI
+    extension_options.hpp GTK-free extension settings
+    config.hpp         parsed settings and diagnostics
+    config/
+      config.cpp       settings/defaults and semantic validation
+      toml.cpp         TOML subset reader
+    config_apply.cpp   maps validated config into application options
+    cli/               each command workflow, behind cli.hpp
+      dispatch.cpp     command routing and daemon/client split
+      options.cpp      global option parsing and application options
+      lifecycle.cpp    start, exit, restart, status, and PID identity checks
+      config_commands.cpp config show/init/check/edit/reload
+      extension_commands.cpp helper lifecycle and extension commands
+      autostart.cpp    desktop-autostart integration
+      protocol.cpp     model/output/simple daemon commands
+      subscribe.cpp    event-stream client
+      common.cpp       shared CLI formatting and socket helpers
     daemon.{cpp,hpp}   flock, log redirect + rotation, RSS, the log filter
     ipc.{cpp,hpp}      line-JSON socket server and client, and the writer
-    config.{cpp,hpp}   the TOML subset reader and the settings
     state.{cpp,hpp}    state.json
 
   pet/                 the figure, and how she is placed and moved
@@ -601,10 +618,20 @@ src/
       layer.hpp         layer-name validation and GTK layer conversion
     bubble.{cpp,hpp}   the speech bubble, including the held streaming line
     menu.{cpp,hpp}     GtkPopoverMenu, built on first open
-tools/asuna-ext.py       the extension helper - runs out of process, holds the
-                         API key, and is the only file here that talks to a network
-tools/asuna-prompt.py    the one line you type at her: a GTK entry on a layer
-                         surface, because it is the only kind that takes an IME
+tools/
+  asuna-ext.py           compatibility entry point for the out-of-process helper
+  asuna-prompt.py        compatibility entry point for the GTK prompt
+  chat/                  helper implementation; provider code never imports GTK
+    __main__.py          command-line entry point
+    helper.py            event loop, orchestration, and prompt process
+    conversation.py      history, streaming, cooldown, and failover
+    provider.py          OpenAI-compatible HTTP provider
+    control.py           Unix control socket client
+    vision.py            focused-window checks and screenshot capture
+    prompt.py            GTK input window, placement, and dragging
+    log.py                helper logging
+  fetch_models.py        download model assets omitted from the repository
+  pam2png.py             inspect the render test's RGBA PAM output
 third_party/live2d-v2/   vendored Common/ Glad/ V2/ — never V3/
 ```
 
@@ -838,7 +865,12 @@ clamps to *that*.
 ## Tests
 
 ```sh
-ctest --test-dir build          # 10 suites, no compositor, no GPU, no network
+cmake --build build
+ctest --test-dir build --output-on-failure  # 11 suites, no compositor, no GPU, no network
+python3 -m compileall -q tools
+ruff check tools tests/ext_test.py
+pyright
+# Or run the same non-desktop checks together: tools/check.sh [build-dir]
 ```
 
 | | |

@@ -49,6 +49,8 @@ from .control import Control, socket_path
 from .log import log
 from .vision import capture, focused_app_id
 
+DESCRIPTION = (__doc__ or "").splitlines()[0]
+
 # How often the token stream is pushed into her bubble. Every token would be a
 # socket round trip per token; a tenth of a second still reads as arriving.
 FLUSH_INTERVAL = 0.10
@@ -446,7 +448,7 @@ class Helper:
         """
         try:
             work(*args)
-        except Exception:   # noqa: BLE001 - the supervisory boundary; see above
+        except Exception:   # the supervisory boundary; see above
             log("unhandled while running %s:\n%s"
                 % (getattr(work, "__name__", work), traceback.format_exc().rstrip()))
 

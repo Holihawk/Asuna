@@ -88,6 +88,9 @@ add_executable(asuna
   src/ui/bubble.cpp
   src/ui/menu.cpp
 )
+# Keep warnings on code we maintain. The vendored Live2D targets have their
+# own legacy warning baseline and are deliberately outside this policy.
+target_compile_options(asuna PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(asuna PRIVATE src)
 # NOTE: gtk4-layer-shell MUST come before gtk4 on the link line. It works by
 # interposing on libwayland-client's global registry, so if GTK (which pulls in

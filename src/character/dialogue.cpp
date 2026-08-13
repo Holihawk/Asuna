@@ -144,9 +144,8 @@ std::string Dialogue::greeting(std::time_t when) {
     if (at != std::string::npos) {
         std::tm local{};
         if (localtime_r(&when, &local)) {
-            char year[8];
-            snprintf(year, sizeof(year), "%d", local.tm_year + 1900);
-            line.replace(at, token.size(), year);
+            line.replace(at, token.size(),
+                         std::to_string(static_cast<long long>(local.tm_year) + 1900));
         }
     }
     return line;

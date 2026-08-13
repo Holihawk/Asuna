@@ -42,6 +42,10 @@ is back inside GTK with the layout pass for its latency. `on_screen` below is
 what closes it off for good.
 """
 
+# PyGObject's gi.repository importer creates these symbols dynamically after
+# require_version(); Pyright cannot inspect that runtime namespace.
+# pyright: reportAttributeAccessIssue=false
+
 import argparse
 import ctypes.util
 import os
@@ -66,14 +70,14 @@ if not os.environ.get("ASUNA_PROMPT_PRELOADED"):
     os.environ.setdefault("GSK_RENDERER", "gl")
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-import cairo   # noqa: E402
-import gi   # noqa: E402
+import cairo
+import gi
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("Graphene", "1.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import (Gdk, GLib, Graphene, Gtk,   # noqa: E402
+from gi.repository import (Gdk, GLib, Graphene, Gtk,  # noqa: E402
                            Gtk4LayerShell as LayerShell)
 
 CSS = b"""
@@ -127,8 +131,10 @@ class Prompt:
         self.screen = (0, 0)
         self.grab = None        # where it and the hand were, when it was grabbed
         self.window = None
-        self.fixed = None
-        self.frame = None
+        # build() must run before place(); annotations record that invariant for
+        # type checkers without weakening these widget types to Optional.
+        self.fixed: Gtk.Fixed
+        self.frame: Gtk.Box
         self.surface = None
 
     def build(self, app):

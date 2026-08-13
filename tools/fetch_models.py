@@ -58,13 +58,13 @@ def asset_paths(index):
     return out
 
 
-def fetch_model(mid, force=False):
-    out_dir = os.path.join(DEST, f"asuna_{mid}")
+def fetch_model(model_id, force=False):
+    out_dir = os.path.join(DEST, f"asuna_{model_id}")
     index_path = os.path.join(out_dir, "index.json")
     os.makedirs(out_dir, exist_ok=True)
 
     if force or not os.path.exists(index_path):
-        data = get(f"{MODELS}/asuna_{mid}/index.json")
+        data = get(f"{MODELS}/asuna_{model_id}/index.json")
         with open(index_path, "wb") as f:
             f.write(data)
     # `with`, not json.load(open(...)): this runs once per outfit in a thread
@@ -82,12 +82,12 @@ def fetch_model(mid, force=False):
             todo.append(rel)
 
     if not todo:
-        return mid, len(asset_paths(index)), 0, None
+        return model_id, len(asset_paths(index)), 0, None
 
     def one(rel):
         dst = os.path.join(out_dir, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        data = get(f"{MODELS}/asuna_{mid}/{rel}")
+        data = get(f"{MODELS}/asuna_{model_id}/{rel}")
         with open(dst, "wb") as f:
             f.write(data)
 
@@ -96,7 +96,7 @@ def fetch_model(mid, force=False):
         for rel, res in zip(todo, pool.map(lambda r: _safe(one, r), todo)):
             if res is not None:
                 errors.append(f"{rel}: {res}")
-    return mid, len(asset_paths(index)), len(todo), errors or None
+    return model_id, len(asset_paths(index)), len(todo), errors or None
 
 
 def _safe(fn, arg):

@@ -461,7 +461,7 @@ def main():
         before = failures
         try:
             test()
-        except Exception:   # noqa: BLE001 - see below
+        except Exception:   # supervisory boundary; see below
             # A test that throws is a failing test, not a reason to stop
             # running the others. It matters here in particular: the shapes
             # this suite feeds the helper are exactly the ones that used to
