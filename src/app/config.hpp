@@ -112,7 +112,7 @@ struct Config {
     // Where it came from, empty if there was no file. Reported by `asuna status`
     // so "my config is being ignored" is answerable without guessing.
     std::string source;
-    // Fatal. Anything in here stops the launch: applyConfig (cli.cpp) returns
+    // Fatal. Anything in here stops the launch: applyConfig (cli/options.cpp) returns
     // kUsage on a non-empty list, and `config reload` refuses rather than
     // half-applying. A value that could not be read or is out of range is one
     // of these, because the user wrote it on purpose and is watching for it.
@@ -159,7 +159,7 @@ struct Config {
     // instead - see the comment there.
     //
     // Defined in config_apply.cpp, a GTK-free mapping unit kept separate from
-    // config.cpp so parser-only users need not link application option mapping.
+    // config/config.cpp so parser-only users need not link application option mapping.
     void applyTo(ShellOptions* opt) const;
 
     // The commented file `asuna config init` writes. Also the documentation:

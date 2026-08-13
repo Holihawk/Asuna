@@ -210,7 +210,7 @@ void aNewlineInAPathSurvives() {
 }
 
 void theNeverPlacedSentinelIsNotRoundedIntoAPosition() {
-    // x carries -1 for "she has never been put anywhere", and shell_render.cpp
+    // x carries -1 for "she has never been put anywhere", and shell/layout.cpp
     // restores the remembered position on `mState.x >= 0`. The old writer used
     // (long)(x + 0.5), which turns -1 into 0 - a position, hard against the
     // left edge, outranking the config's anchor from then on.

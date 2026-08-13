@@ -83,7 +83,7 @@ struct ExtConfig {
     double visionNotice = 3.0;                      // s she looks up before the shutter
     std::vector<std::string> visionDeny;            // window app-ids never captured
 
-    // The built-in text of the two prompts. Defined in config.cpp next to the
+    // The built-in text of the two prompts. Defined in config/config.cpp next to the
     // file that documents them, so the default and the documentation cannot
     // drift; the config test asserts they are the same string.
     static const char* defaultPersona();

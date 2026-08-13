@@ -1,5 +1,5 @@
 #!/bin/sh
-# Command-level tests for the argument handling in src/app/cli.cpp.
+# Command-level tests for the argument handling under src/app/cli/.
 #
 # argparse_test.cpp covers the parsers themselves; this covers the wiring, which
 # is where the two Phase 1 review findings actually lived. Neither was a bug in

@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "ui/shell_internal.hpp"
+#include "ui/shell/internal.hpp"
 
 namespace asuna {
 gboolean Shell::onPokeTimeout(gpointer data) {

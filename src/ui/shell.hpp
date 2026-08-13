@@ -28,21 +28,18 @@ namespace asuna {
 // takes. GTK hands out logical pixels, so anything crossing that boundary - the
 // pointer, the input region, the size request - goes through mScaleFactor.
 //
-// One class, seven files, split by what each part of it is for:
+// One class, focused files split by what each part of it is for:
 //
-//   ui/shell.cpp          the window, the monitor, the layer, the config file,
-//                         the state file, and the main loop around them
-//   ui/shell_render.cpp   the GL callbacks, the framing, where she stands, and
-//                         the input region sampled out of her own alpha
-//   ui/shell_input.cpp    the drag, the tap, the gaze, the halo, the wheel and
-//                         the right-click menu
-//   ui/shell_speech.cpp   the hooks Behaviour reaches her through, and the
-//                         speech bubble
-//   ui/shell_command.cpp  what each `asuna <verb>` does when it arrives
-//   ui/shell_ext.cpp      the events an out-of-process helper subscribes to,
-//                         and the consent in front of a screen capture
-//   ui/shell_debug.cpp    the ASUNA_DEBUG_* hooks, which are the only way to
-//                         drive a pointer on a compositor that has none to give
+//   ui/shell/construction.cpp  construction, the window, and loaded outfit
+//   ui/shell/runtime.cpp       monitor/layer/config/state changes and main loop
+//   ui/shell/render.cpp        the GL callbacks and frame clock
+//   ui/shell/layout.cpp        framing, strip sizing, position, and user scale
+//   ui/shell/region.cpp        the input region sampled out of her own alpha
+//   ui/shell/input.cpp         drag, tap, gaze, halo, wheel and right-click menu
+//   ui/shell/speech.cpp        Behaviour hooks and the speech bubble
+//   ui/shell/command.cpp       what each `asuna <verb>` does when it arrives
+//   ui/shell/extension.cpp     extension events and screen-capture consent
+//   ui/shell/debug.cpp         ASUNA_DEBUG_* synthetic-input hooks
 class Shell {
 public:
     explicit Shell(ShellOptions opt);
@@ -68,7 +65,7 @@ private:
     ipc::Reply handleCommand(const Json& request);
 
     // --- extensions -------------------------------------------------------
-    // ui/shell_ext.cpp. Everything here exists for the out-of-process helper
+    // ui/shell/extension.cpp. Everything here exists for the out-of-process helper
     // (see the README, "Extensions"): the daemon does not talk to an API, hold
     // a key or take a screenshot, it only makes her reachable and legible from
     // a program that does.

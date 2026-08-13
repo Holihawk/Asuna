@@ -9,7 +9,7 @@
 
 namespace {
 
-// The daemon half of the dispatch: everything else in cli.cpp is a client that
+// The daemon half of the dispatch: everything else under app/cli/ is a client that
 // never touches GTK. Handed over as a function pointer so the fork-and-detach
 // logic can live next to the command line it belongs to without dragging the
 // toolkit in with it.

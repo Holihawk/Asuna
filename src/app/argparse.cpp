@@ -22,7 +22,7 @@ bool isSpace(char c) {
 }
 
 // Numbers in messages, without the trailing zeroes `std::to_string` insists on.
-// config.cpp reports "must be between 0.500000 and 2.500000" through
+// config/config.cpp reports "must be between 0.500000 and 2.500000" through
 // std::to_string; there is no reason for the command line to read that way too.
 std::string plain(double v) {
     char buf[32];

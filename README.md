@@ -585,16 +585,20 @@ src/
     dialogue.{cpp,hpp} dialogue.zh.json: no-repeat picking, time and season bands
 
   ui/                  everything that touches GTK
-    shell.hpp          the one class the seven shell*.cpp files make up
-    shell.cpp          window, layer-shell, monitor, layer, config, state, loop
-    shell_render.cpp   GL callbacks, framing, placement, the input region
-    shell_input.cpp    drag, tap, gaze, halo, wheel, right-click
-    shell_speech.cpp   the Behaviour hooks, and where the bubble goes
-    shell_command.cpp  what each `asuna <verb>` does on arrival
-    shell_ext.cpp      the events an extension subscribes to, and the consent
-                       in front of a screen capture - no API client anywhere
-    shell_debug.cpp    the ASUNA_DEBUG_* hooks - synthetic input, since a
-                       compositor will not give a test a real pointer
+    shell.hpp          stable public interface for the Shell class
+    shell/             the Shell implementation, grouped by responsibility
+      construction.cpp  startup state, window construction, outfit loading
+      runtime.cpp       monitor/layer/config/state changes and the main loop
+      render.cpp        GL callbacks and frame clock
+      layout.cpp        framing, strip sizing, placement and user scale
+      region.cpp        alpha-sampled compositor input region
+      input.cpp         drag, tap, gaze, halo, wheel and right-click
+      speech.cpp        the Behaviour hooks and where the bubble goes
+      command.cpp       what each `asuna <verb>` does on arrival
+      extension.cpp     extension events and screen-capture consent
+      debug.cpp         ASUNA_DEBUG_* synthetic-input hooks
+      internal.hpp      constants shared by Shell implementation units
+      layer.hpp         layer-name validation and GTK layer conversion
     bubble.{cpp,hpp}   the speech bubble, including the held streaming line
     menu.{cpp,hpp}     GtkPopoverMenu, built on first open
 tools/asuna-ext.py       the extension helper - runs out of process, holds the

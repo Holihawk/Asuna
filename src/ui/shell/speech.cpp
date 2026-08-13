@@ -4,7 +4,7 @@
 
 #include <ctime>
 
-#include "ui/shell_internal.hpp"
+#include "ui/shell/internal.hpp"
 
 namespace asuna {
 // --- personality ------------------------------------------------------------

@@ -11,7 +11,7 @@ namespace asuna {
 // much memory it is using.
 //
 // Primitives only. What `asuna start` actually does with them - fork twice,
-// wait for the socket, print a confirmation - is policy and lives in cli.cpp.
+// wait for the socket, print a confirmation - is policy and lives under app/cli/.
 namespace daemon {
 
 // The single-instance lock: an `flock` held on a file for the lifetime of the

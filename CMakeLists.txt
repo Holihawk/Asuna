@@ -48,8 +48,17 @@ add_executable(asuna
   src/paths.cpp
 
   src/app/argparse.cpp
-  src/app/cli.cpp
-  src/app/config.cpp
+  src/app/cli/dispatch.cpp
+  src/app/cli/autostart.cpp
+  src/app/cli/common.cpp
+  src/app/cli/config_commands.cpp
+  src/app/cli/extension_commands.cpp
+  src/app/cli/lifecycle.cpp
+  src/app/cli/options.cpp
+  src/app/cli/protocol.cpp
+  src/app/cli/subscribe.cpp
+  src/app/config/config.cpp
+  src/app/config/toml.cpp
   src/app/config_apply.cpp
   src/app/daemon.cpp
   src/app/ipc.cpp
@@ -63,16 +72,19 @@ add_executable(asuna
   src/character/behaviour.cpp
   src/character/dialogue.cpp
 
-  # One Shell class, split by what each part of it is for: the window and its
-  # lifecycle, the pixels, the pointer, what she says, the control socket, what
-  # an out-of-process extension can see, and the synthetic-input diagnostics.
-  src/ui/shell.cpp
-  src/ui/shell_render.cpp
-  src/ui/shell_input.cpp
-  src/ui/shell_speech.cpp
-  src/ui/shell_command.cpp
-  src/ui/shell_ext.cpp
-  src/ui/shell_debug.cpp
+  # One Shell class, split by responsibility: construction, runtime state,
+  # rendering, layout, input regions, pointer input, speech, commands,
+  # extensions, and synthetic-input diagnostics.
+  src/ui/shell/construction.cpp
+  src/ui/shell/runtime.cpp
+  src/ui/shell/render.cpp
+  src/ui/shell/layout.cpp
+  src/ui/shell/region.cpp
+  src/ui/shell/input.cpp
+  src/ui/shell/speech.cpp
+  src/ui/shell/command.cpp
+  src/ui/shell/extension.cpp
+  src/ui/shell/debug.cpp
   src/ui/bubble.cpp
   src/ui/menu.cpp
 )
@@ -116,13 +128,15 @@ target_link_libraries(asuna-ipc-test PRIVATE PkgConfig::GLIB)
 #
 # Config parsing remains its own leaf. Config::applyTo is intentionally absent:
 # it lives in a separate GTK-free TU so this target need not link mapping code.
-add_executable(asuna-config-test tests/config_test.cpp src/app/config.cpp src/paths.cpp)
+add_executable(asuna-config-test
+  tests/config_test.cpp src/app/config/config.cpp src/app/config/toml.cpp src/paths.cpp)
 target_include_directories(asuna-config-test PRIVATE src)
 
 # Config-to-options mapping has its own test and TU. This proves mapping remains
 # owned by app/config without making the parser suite depend on it or on GTK.
 add_executable(asuna-config-apply-test
-  tests/config_apply_test.cpp src/app/config_apply.cpp src/app/config.cpp src/paths.cpp)
+  tests/config_apply_test.cpp src/app/config_apply.cpp src/app/config/config.cpp
+  src/app/config/toml.cpp src/paths.cpp)
 target_include_directories(asuna-config-apply-test PRIVATE src)
 
 # Compile-only boundary guard for public application headers. It deliberately
