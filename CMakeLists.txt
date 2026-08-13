@@ -28,6 +28,10 @@ if(NOT LIVE2D_GLES)
 endif()
 include(${LIVE2D_ROOT}/V2/cmake/V2.cmake)   # defines target V2 / Live2D::V2
 
+# Warnings apply to all project-owned targets declared below. The vendored
+# Live2D targets above retain their separate legacy warning baseline.
+add_compile_options(-Wall -Wextra -Wpedantic)
+
 # ---------------------------------------------------------------------------
 # asuna - the desktop pet
 # ---------------------------------------------------------------------------
@@ -88,9 +92,6 @@ add_executable(asuna
   src/ui/bubble.cpp
   src/ui/menu.cpp
 )
-# Keep warnings on code we maintain. The vendored Live2D targets have their
-# own legacy warning baseline and are deliberately outside this policy.
-target_compile_options(asuna PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(asuna PRIVATE src)
 # NOTE: gtk4-layer-shell MUST come before gtk4 on the link line. It works by
 # interposing on libwayland-client's global registry, so if GTK (which pulls in

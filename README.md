@@ -873,6 +873,17 @@ pyright
 # Or run the same non-desktop checks together: tools/check.sh [build-dir]
 ```
 
+On a live Wayland session, the compositor-dependent acceptance pass is:
+
+```sh
+tools/desktop_check.sh build
+```
+
+It uses temporary XDG config/state/runtime directories and restores any
+temporary output-scale change. It does not contact a model provider. The pass
+requires `niri`, `grim`, and a second physical output to exercise monitor
+hot-unplug; that case is reported as skipped when the machine has one output.
+
 | | |
 | --- | --- |
 | `motion` | drag feel, lift, landing and squash, asserted without a pointer |
@@ -889,6 +900,13 @@ pyright
 `ext` runs `tools/asuna-ext.py` with `Provider.request` replaced by canned responses, so it
 needs no network and no API key. It is skipped if `python3` is missing, which would also
 mean the extension helper could not run at all.
+
+`tools/desktop_check.sh` is separate from CTest because it needs a compositor and a real
+Wayland surface. It checks layer-shell startup and remapping, hide/show/toggle, output
+selection, live reload and persistence precedence, the GTK prompt's keyboard policy and
+timeout, screenshot consent/cancellation/masking/deny-list gates, helper outage/restart,
+fractional and 2x output scaling, and daemon shutdown. It never uses a network provider;
+the helper outage case points at an unused localhost port.
 
 The config suite also parses what `asuna config init` writes and asserts it produces a
 `Config` identical to a default-constructed one — which is what stops the documented

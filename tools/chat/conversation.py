@@ -111,8 +111,12 @@ class Chat:
         if image is not None:
             content = [
                 {"type": "text", "text": text},
-                {"type": "image_url",
-                 "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/jpeg;base64," + base64.b64encode(image).decode()
+                    },
+                },
             ]
         messages = ([{"role": "system", "content": self.persona}] if self.persona else [])
         messages += self.history + [{"role": "user", "content": content}]

@@ -3,5 +3,6 @@
 __pycache__
 *.pyc
 *.pyo
+.ruff_cache/
 improve_additional.md
 improve_report.md
