@@ -34,8 +34,6 @@ constexpr int kStagedNoFork = 1;
 constexpr int kStagedNoPidFile = 2;
 constexpr int kStagedCleanupFailed = 3;
 constexpr int kStagedNoGate = 4;
-constexpr int kTermTimeoutMs = 5000;
-constexpr int kKillTimeoutMs = 2000;
 
 }  // namespace
 

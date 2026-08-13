@@ -190,7 +190,7 @@ add_test(NAME behaviour COMMAND asuna-behaviour-test
 # The extension helper's failover, offline. python3 is not an added dependency:
 # tools/asuna-ext.py is what `asuna ext start` runs, so a tree that cannot run
 # this suite cannot run the feature it tests either. No network and no daemon -
-# Provider.request is replaced with canned responses.
+# chat.provider.Provider.request is replaced with canned responses.
 find_program(PYTHON3 python3)
 if(PYTHON3)
   add_test(NAME ext COMMAND ${PYTHON3} ${CMAKE_CURRENT_LIST_DIR}/tests/ext_test.py)

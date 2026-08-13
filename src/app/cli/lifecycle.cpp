@@ -24,8 +24,6 @@ namespace {
 // How long `start` waits for the socket to answer, and how long `exit` waits
 // for the process to actually be gone before escalating.
 constexpr int kStartTimeoutMs = 10000;
-constexpr int kTermTimeoutMs = 5000;
-constexpr int kKillTimeoutMs = 2000;
 
 }  // namespace
 

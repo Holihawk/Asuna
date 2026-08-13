@@ -8,6 +8,12 @@
 namespace asuna {
 namespace cli {
 
+// Private coordination surface for the CLI implementation units. Keep only
+// declarations and constants that genuinely have more than one owner here;
+// the public command boundary remains app/cli.hpp.
+inline constexpr int kTermTimeoutMs = 5000;
+inline constexpr int kKillTimeoutMs = 2000;
+
 extern bool gJson;
 
 int nowMs();

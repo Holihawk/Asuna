@@ -72,9 +72,12 @@ install -m 644 "${here}/data/dialogue.zh.json" "${sharedir}/dialogue.zh.json"
 # The extension helper and the prompt window it opens. Installed always and
 # started never: they do nothing until [ext] enabled is set and `asuna ext
 # start` is run, and the binary looks for the helper here (paths::extHelper),
-# which then looks for the prompt beside itself.
+# which then imports the implementation package beside both wrappers.
 install -m 755 "${here}/tools/asuna-ext.py" "${sharedir}/asuna-ext.py"
 install -m 755 "${here}/tools/asuna-prompt.py" "${sharedir}/asuna-prompt.py"
+rm -rf "${sharedir}/chat"
+install -d "${sharedir}/chat"
+install -m 644 "${here}"/tools/chat/*.py "${sharedir}/chat/"
 
 rm -rf "${sharedir}/models"
 if [[ $link_models -eq 1 ]]; then

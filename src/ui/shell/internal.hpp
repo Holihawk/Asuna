@@ -2,7 +2,7 @@
 
 #include <glib.h>
 
-// The handful of Shell constants that more than one of shell*.cpp needs.
+// The handful of Shell constants that more than one shell/*.cpp unit needs.
 // Everything else stays in the anonymous namespace of the file that uses it -
 // this header exists to share three numbers, not to become a dumping ground.
 namespace asuna {

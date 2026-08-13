@@ -356,6 +356,16 @@ def the_prompt_command_is_split_by_shlex_not_by_spaces():
         check("prompt_command" in str(e), "and the message names the setting: %s" % e)
 
 
+def the_bundled_prompt_remains_beside_the_compatibility_wrapper():
+    helper = ext.Helper.__new__(ext.Helper)
+    helper.config = {}
+    argv = helper.prompt_argv({})
+    check_eq(argv[0], sys.executable, "the bundled prompt uses this Python")
+    check_eq(argv[1], os.path.join(os.path.dirname(HELPER), "asuna-prompt.py"),
+             "the package resolves the wrapper in its parent directory")
+    check(os.path.exists(argv[1]), "the resolved prompt wrapper exists")
+
+
 def a_cancel_lands_while_the_run_loop_is_busy_answering():
     """`asuna ext cancel` has to work at the one moment it is wanted.
 
@@ -413,6 +423,15 @@ def the_helper_survives_work_that_throws():
     check_eq(reached, ["still running"], "the loop carries on to the next piece of work")
 
 
+def provider_only_imports_do_not_load_gtk():
+    # Provider and conversation tests must remain usable on a server with no
+    # GTK stack. The compatibility wrapper imports the whole non-GTK helper
+    # surface, so its successful import above is already the strongest version
+    # of that check; pin down the dependency boundary as well.
+    check("chat.prompt" not in sys.modules, "the prompt module was not imported")
+    check("gi" not in sys.modules, "PyGObject was not imported")
+
+
 TESTS = [
     an_empty_stream_falls_over_to_the_next_provider,
     an_empty_answer_is_not_written_into_the_history,
@@ -428,8 +447,10 @@ TESTS = [
     a_provider_with_no_working_neighbour_still_reports_every_reason,
     all_providers_cooling_down_are_tried_anyway,
     the_prompt_command_is_split_by_shlex_not_by_spaces,
+    the_bundled_prompt_remains_beside_the_compatibility_wrapper,
     a_cancel_lands_while_the_run_loop_is_busy_answering,
     the_helper_survives_work_that_throws,
+    provider_only_imports_do_not_load_gtk,
 ]
 
 
