@@ -7,8 +7,10 @@ import time
 import urllib.error
 import urllib.request
 
-# Connect/first-byte budget per provider. Short, because it is also how long a
-# dead provider delays the live one behind it in the list.
+# Non-streaming provider probes get a short connect/first-byte budget, so a dead
+# provider delays the live one behind it by at most this long. Streaming chat
+# requests use READ_TIMEOUT instead, because generation can legitimately take
+# longer between response chunks.
 CONNECT_TIMEOUT = 8.0
 READ_TIMEOUT = 60.0
 

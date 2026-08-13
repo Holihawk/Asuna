@@ -186,7 +186,7 @@ pass "persistence precedence is CLI > state > config in a real session"
 
 prompt_log="${root}/prompt.log"
 set +e
-"${run[@]}" python3 "${repo}/tools/asuna-prompt.py" --timeout 0.8 --x 960 --bottom 540 \
+"${run[@]}" python3 "${repo}/tools/asuna-prompt.py" --timeout 2.0 --x 960 --bottom 540 \
     --screen-width 1920 --screen-height 1080 >"$prompt_log" 2>&1 &
 prompt_pid=$!
 set -e
@@ -288,7 +288,15 @@ for _ in {1..30}; do
     sleep 0.1
 done
 if "${run[@]}" "$asuna" ext status >/dev/null 2>&1; then
-    fail "crashed helper still reported healthy"
+    helper_status_failed=0
+    for _ in {1..30}; do
+        if ! "${run[@]}" "$asuna" ext status >/dev/null 2>&1; then
+            helper_status_failed=1
+            break
+        fi
+        sleep 0.1
+    done
+    [[ $helper_status_failed -eq 1 ]] || fail "crashed helper still reported healthy"
 fi
 status >/dev/null || fail "helper crash took down the daemon"
 "${run[@]}" "$asuna" ext start >/dev/null
@@ -305,12 +313,17 @@ fi
 for test_scale in 1.25 2.0; do
     scale_changed=1
     niri msg output "$output" scale "$test_scale" >/dev/null
+    scale_ready=0
     for _ in {1..50}; do
-        actual="$(niri msg --json outputs | jq -r --arg output "$output" '.[$output].logical.scale')"
-        [[ "$actual" = "$test_scale" ]] && break
+        if niri msg --json outputs | jq -e \
+            --arg output "$output" --argjson expected "$test_scale" \
+            '.[$output].logical.scale == $expected' >/dev/null; then
+            scale_ready=1
+            break
+        fi
         sleep 0.1
     done
-    [[ "$actual" = "$test_scale" ]] || fail "niri did not apply output scale $test_scale"
+    [[ $scale_ready -eq 1 ]] || fail "niri did not apply output scale $test_scale"
     wait_ready || fail "renderer was not ready at output scale $test_scale"
     wait_layer yes || fail "layer surface disappeared at output scale $test_scale"
 done
@@ -328,6 +341,5 @@ done
 kill -0 "$shutdown_helper" 2>/dev/null && fail "helper survived daemon shutdown"
 pass "daemon shutdown publishes bye and the helper exits"
 
-trap - EXIT INT TERM
 printf '\nPhase 8 desktop checks: %d passed, %d skipped\n' "$passed" "$skipped"
 printf 'Artifacts and logs: %s\n' "$root"

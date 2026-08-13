@@ -36,6 +36,7 @@ boilerplate.
 - [How it is built](#how-it-is-built)
 - [Things that were not obvious](#things-that-were-not-obvious)
 - [Tests](#tests)
+- [The review](#the-review)
 - [Licensing](#licensing)
 - [Known limits](#known-limits)
 - [What is next](#what-is-next)
@@ -947,6 +948,61 @@ compositor but cannot be reached without a pointer this machine cannot synthesis
 
 ---
 
+## The review
+
+In August 2026 the tree was read end to end and the findings were worked through as nine
+numbered phases. The working notes are gone; what they concluded lives here and in the code.
+
+### The five things that were actually wrong
+
+Each was confirmed against the source before anything was changed, and each has a test that
+fails if it comes back.
+
+| | What it was | Closed by |
+| --- | --- | --- |
+| 1 | `atoi`/`atof` at 14 call sites: `asuna scale nope` was sent as 0, `asuna move 1.2.3` was partly parsed | `app/argparse.cpp` — strict parsers that reject trailing characters, `nan`, `inf` and overflow, with one error message shape for all of them |
+| 2 | A provider that answered HTTP 200 and immediately `[DONE]` counted as a success, so the next provider was never tried — and an empty assistant turn went into the history and stayed there | `chat/conversation.py` — failover happens before the first token and never after; an empty stream cools that provider down and moves on |
+| 3 | `state.json` wrote `model`, `layer` and `output` raw between quotes, so a quote or a backslash in a path — both legal in a filename — produced a file that would not parse | `app/state.cpp` — every string through `Json::quote`, and the reader parses the file instead of scanning it for `"x"` |
+| 4 | Two independent tokenizers split configured commands on literal spaces, so a quoted path could not work | One grammar for both ends: `shlex` in Python, `argparse.cpp` in C++ |
+| 5 | `kill(pid, 0)` cannot prove the pid still belongs to the helper | `daemon::Signal` — start time recorded beside the pid for durable identity, a pidfd opened fresh by whoever is about to signal, and a three-state `probe()` so "cannot tell" is never read as "it has gone" |
+
+The last one is the one to read the code for. A pid file and a pidfd each close half of it:
+the file is what survives between `ext start` and `ext stop`, the pidfd is what refers to a
+process rather than to a number at the moment the signal goes out. `ext stop` removes the
+file only after the exact target is confirmed gone, and `ext start` holds the helper behind
+a close-on-exec gate so it cannot run the configured program until its identity is on disk.
+
+### What moved, and what did not
+
+Phases 4 through 6 were structural and changed no behaviour: `ShellOptions` and the
+extension settings became GTK-free application headers, `Config::applyTo` moved into its own
+translation unit so the config test still links a parser rather than a toolkit, the
+1,518-line `cli.cpp` and the two oversized Shell units were split by responsibility into
+`app/cli/`, `app/config/` and `ui/shell/`, and the two Python scripts became `tools/chat/`
+behind compatibility wrappers at their old paths. `motion`, `behaviour`, `framing`, `ipc`,
+`dialogue` and `outfits` were left alone — no new responsibility had appeared in them.
+
+The dependency rules that came out of it are recorded next to what enforces them in
+`CMakeLists.txt`: app headers may not include `ui/`, and `asuna-app-headers-test` compiles
+them with `-Isrc` and no GTK flags, so an `app -> ui` include breaks the ordinary build.
+
+### The baseline
+
+Phase 0 recorded the tree's behaviour before anything was touched, so that any later change
+could be attributed to the phase that made it: the toolchain in [Requirements](#requirements),
+the `--json` output of `status`, `model list`, `config check` and `ext status`, and the file
+layout under `~/.config`, `~/.local/state` and `/run/user`. The check to re-run after any
+change is `tools/check.sh`, and on a live session `tools/desktop_check.sh` — both in
+[Tests](#tests).
+
+Two things it pinned down are still worth knowing. `state.json` stores `"output": ""` while
+`status` reports a real connector: the running output is resolved at startup and deliberately
+not persisted, because persisting it would change what happens when that monitor is
+unplugged. And the build's one compiler warning is in vendored `stb_image.h`, which is why
+`-Wall -Wextra -Wpedantic` is applied to project targets only.
+
+---
+
 ## Licensing
 
 **Read this before publishing anything.** Three layers, and only one of them is clean.
@@ -997,10 +1053,11 @@ mapped. The request does go out live — `WAYLAND_DEBUG=1` shows `set_margin(0, 
 followed by a commit — and she does not move, so it is not something another call on our
 side would fix. `asuna config reload` says so rather than leaving it to be discovered.
 
-**HiDPI is written for but untested.** Everything crossing the GTK boundary goes through the
-scale factor, and `applyFraming()` re-solves when it changes under her — but the only
-display here is 1920×1080 at scale 1.0, where every one of those conversions is the identity,
-so the scaled paths have never actually run.
+**HiDPI is half-tested.** Everything crossing the GTK boundary goes through the scale factor,
+and `applyFraming()` re-solves when it changes under her. `tools/desktop_check.sh` drives the
+only display here from scale 1.0 to 1.25 and 2.0 and back, and she stays mapped and rendering
+across both, so the scaled paths do run. What has never been tried is starting on a display
+that is natively HiDPI, or two monitors at different scales at once.
 
 **Multi-monitor is written for and half-tested.** `asuna output <name>` switches monitors,
 keeps her in the corner she was in rather than at the pixel she was at, and remembers the
