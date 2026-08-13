@@ -48,6 +48,7 @@ what closes it off for good.
 
 import argparse
 import ctypes.util
+import json
 import os
 import sys
 
@@ -79,6 +80,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
 from gi.repository import (Gdk, GLib, Graphene, Gtk,  # noqa: E402
                            Gtk4LayerShell as LayerShell)
+
+from .control import Control, socket_path  # noqa: E402
 
 CSS = b"""
 window { background: none; }
@@ -117,6 +120,10 @@ window { background: none; }
 # where it can be dragged, so it can always be got hold of again.
 EDGE = 8
 
+# Pointer coordinates can move slightly across an otherwise stationary click.
+# Only a deliberate move pins the prompt.
+DRAG_THRESHOLD = 2
+
 
 class Prompt:
     def __init__(self, args):
@@ -136,6 +143,7 @@ class Prompt:
         self.fixed: Gtk.Fixed
         self.frame: Gtk.Box
         self.surface = None
+        self.drag_moved = False
 
     def build(self, app):
         window = Gtk.ApplicationWindow(application=app)
@@ -228,6 +236,12 @@ class Prompt:
         drag.connect("drag-update", self.on_drag_update)
         drag.connect("drag-end", self.on_drag_end)
         label.add_controller(drag)
+        reset = Gtk.GestureClick(button=Gdk.BUTTON_PRIMARY)
+        # Observe clicks before the target-phase drag gesture arbitrates the
+        # same sequence. Motion still cancels GestureClick in the usual way.
+        reset.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        reset.connect("released", self.on_handle_released)
+        label.add_controller(reset)
         # So the handle looks like one. GTK4 CSS has no cursor property, so this
         # is the only place it can be said.
         label.set_cursor(Gdk.Cursor.new_from_name("grab", None))
@@ -249,17 +263,30 @@ class Prompt:
         _minimum, wide, _mb, _nb = self.frame.measure(Gtk.Orientation.HORIZONTAL, -1)
         _minimum, tall, _mb, _nb = self.frame.measure(Gtk.Orientation.VERTICAL, wide)
         self.size = (wide, tall)
+        if self.args.position_left is not None and self.args.position_bottom is not None:
+            self.move_to(self.args.position_left, self.args.position_bottom)
+            return
+        self.place_at({"anchor_x": self.args.x,
+                       "anchor_bottom": self.args.bottom,
+                       "anchor_place": self.args.place})
+
+    def place_at(self, where):
+        """Place against an anchor supplied by the daemon."""
+        x = int(where.get("anchor_x", 0))
+        bottom = int(where.get("anchor_bottom", 0))
+        place = where.get("anchor_place", "above")
+        wide, tall = self.size
         # `--x` and `--bottom` are one point on her; `--place` says which part of
         # the prompt to hang on it. The daemon picks between them because it is
         # the one that knows how big she is and how much screen is left; the
         # arithmetic is here because it is the one that knows how big the prompt
         # is, which it only finds out by measuring, above.
-        if self.args.place == "left":         # beside her, on her left
-            self.move_to(self.args.x - wide, self.args.bottom - tall // 2)
-        elif self.args.place == "right":      # ...or on her right
-            self.move_to(self.args.x, self.args.bottom - tall // 2)
+        if place == "left":                   # beside her, on her left
+            self.move_to(x - wide, bottom - tall // 2)
+        elif place == "right":                # ...or on her right
+            self.move_to(x, bottom - tall // 2)
         else:                                 # over her head, centred on her
-            self.move_to(self.args.x - wide // 2, self.args.bottom)
+            self.move_to(x - wide // 2, bottom)
 
     def screen_size(self):
         """How big the surface is about to be, which is the whole output."""
@@ -336,6 +363,7 @@ class Prompt:
         # drag that runs into a screen edge and comes back arrives where the
         # hand is instead of where the clamp left it.
         self.grab = (self.left, self.bottom, self.on_screen(x, y))
+        self.drag_moved = False
         self.handle.set_cursor(Gdk.Cursor.new_from_name("grabbing", None))
 
     def on_screen(self, x, y):
@@ -373,10 +401,60 @@ class Prompt:
         self.move_to(left + round(now[0] - was[0]), bottom - round(now[1] - was[1]))
 
     def on_drag_end(self, gesture, dx, dy):
+        start = self.grab[:2] if self.grab is not None else (self.left, self.bottom)
         self.on_drag_update(gesture, dx, dy)
+        self.drag_moved = max(abs(self.left - start[0]),
+                              abs(self.bottom - start[1])) > DRAG_THRESHOLD
         self.grab = None
         self.sync_region()          # ...and it is somewhere else now
         self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+        if self.drag_moved:
+            self.report_position()
+
+    def on_handle_released(self, _gesture, n_press, _x, _y):
+        if n_press == 2 and not self.drag_moved:
+            self.reset_position()
+
+    def reset_position(self):
+        """Return to the pet's current anchor and release the process-local pin."""
+        try:
+            where = Control(socket_path()).call("ext", status=True)
+        except (IOError, OSError):
+            # The opening anchor is preferable to a reset that appears to do
+            # nothing when the daemon disappears during this prompt.
+            where = {"anchor_x": self.args.x,
+                     "anchor_bottom": self.args.bottom,
+                     "anchor_place": self.args.place}
+        if "anchor_x" not in where:
+            where = {"anchor_x": self.args.x,
+                     "anchor_bottom": self.args.bottom,
+                     "anchor_place": self.args.place,
+                     "screen_width": where.get("screen_width", 0),
+                     "screen_height": where.get("screen_height", 0)}
+        if where.get("screen_width") and where.get("screen_height"):
+            self.screen = (int(where["screen_width"]), int(where["screen_height"]))
+        self.place_at(where)
+        self.report_reset()
+
+    def report_position(self):
+        """Send coordinates to the owning helper without mixing them into stdout."""
+        if self.args.position_fd < 0:
+            return
+        try:
+            report = json.dumps(
+                {"event": "position", "left": self.left, "bottom": self.bottom}) + "\n"
+            os.write(self.args.position_fd, report.encode())
+        except OSError:
+            # The helper may have been stopped while this window was closing.
+            pass
+
+    def report_reset(self):
+        if self.args.position_fd < 0:
+            return
+        try:
+            os.write(self.args.position_fd, b'{"event":"reset"}\n')
+        except OSError:
+            pass
 
     def on_activate(self, entry, window):
         self.text = entry.get_text().strip()
@@ -403,7 +481,7 @@ class Prompt:
 
 def main():
     parser = argparse.ArgumentParser(description="Ask for one line, beside her.")
-    parser.add_argument("--prompt", default="asuna")
+    parser.add_argument("--prompt", default="Asuna")
     parser.add_argument("--placeholder", default="")
     parser.add_argument("--x", type=int, default=0, help="the point on her, logical px")
     parser.add_argument("--bottom", type=int, default=0, help="...and how far up it is")
@@ -416,6 +494,11 @@ def main():
     # to 0, meaning "not told", and GDK is asked for the monitor instead.
     parser.add_argument("--screen-width", type=int, default=0)
     parser.add_argument("--screen-height", type=int, default=0)
+    parser.add_argument("--position-left", type=int, default=None,
+                        help="restore an absolute logical-pixel position")
+    parser.add_argument("--position-bottom", type=int, default=None)
+    parser.add_argument("--position-fd", type=int, default=-1,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=0, help="0 waits indefinitely")
     args = parser.parse_args()
 

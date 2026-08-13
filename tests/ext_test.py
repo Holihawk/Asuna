@@ -366,6 +366,35 @@ def the_bundled_prompt_remains_beside_the_compatibility_wrapper():
     check(os.path.exists(argv[1]), "the resolved prompt wrapper exists")
 
 
+def prompt_position_is_process_local_and_restored_only_for_the_bundled_prompt():
+    helper = ext.Helper.__new__(ext.Helper)
+    helper.config = {"prompt_command": ""}
+    helper.prompt_position = None
+    helper.remember_prompt_position(
+        'not json\n{"event":"position","left":120,"bottom":80}\n'
+        '{"event":"position","left":240,"bottom":160}\n')
+    check_eq(helper.prompt_position, (240, 160), "the latest complete report wins")
+    argv = helper.prompt_argv({}, position_fd=9)
+    check_eq(argv[-6:], ["--position-left", "240", "--position-bottom", "160",
+                         "--position-fd", "9"],
+             "the bundled prompt restores and reports its position")
+
+    helper.config = {"prompt_command": "custom-prompt"}
+    check_eq(helper.prompt_argv({}, position_fd=9), ["custom-prompt"],
+             "a custom prompt keeps its existing argv contract")
+
+    helper.remember_prompt_position('{"event":"reset"}\n')
+    check_eq(helper.prompt_position, None, "a handle double-click releases the pin")
+    argv = helper.prompt_argv({}, position_fd=9)
+    check("--position-left" not in argv and "--position-bottom" not in argv,
+          "an unpinned prompt goes back to daemon-chosen placement")
+
+    helper.remember_prompt_position(
+        '{"event":"reset"}\n{"event":"position","left":300,"bottom":200}\n')
+    check_eq(helper.prompt_position, (300, 200),
+             "dragging after a reset pins the new position again")
+
+
 def a_cancel_lands_while_the_run_loop_is_busy_answering():
     """`asuna ext cancel` has to work at the one moment it is wanted.
 
@@ -448,6 +477,7 @@ TESTS = [
     all_providers_cooling_down_are_tried_anyway,
     the_prompt_command_is_split_by_shlex_not_by_spaces,
     the_bundled_prompt_remains_beside_the_compatibility_wrapper,
+    prompt_position_is_process_local_and_restored_only_for_the_bundled_prompt,
     a_cancel_lands_while_the_run_loop_is_busy_answering,
     the_helper_survives_work_that_throws,
     provider_only_imports_do_not_load_gtk,

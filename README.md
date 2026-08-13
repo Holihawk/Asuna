@@ -368,7 +368,7 @@ a number of its own. She is far taller than she is wide, so sideways is where th
 then. The daemon sends `anchor_place`; the prompt hangs the matching part of itself on the
 point, since it is the only one that knows how big it is.
 
-**Drag the label to move it** — the `asuna` on the left is a handle, and carries the window
+**Drag the label to move it** — the `Asuna` on the left is a handle, and carries the window
 with it. On the label and nowhere else, because that is the one part of the prompt text never
 reaches: anything overlapping the entry has to be told apart from putting the caret somewhere
 and from sweeping a selection, and the only ways to do that are a hold before the drag starts
@@ -377,6 +377,13 @@ separate widget has neither problem, so the drag begins on the press. It cannot 
 off the screen. The window it carries is the whole screen and always was — the prompt is a
 child inside it, so dragging moves nothing the pointer is measured against, and the surface's
 input region is cut to the prompt so the rest of it is not there.
+
+**Its dragged position lasts for the helper's lifetime.** Until it is dragged, each new prompt
+uses the pet's current position and size. After a real drag, every later prompt opens at that
+same screen position, including follow-ups and new conversations. Double-click `Asuna` to move
+it immediately back beside the pet and resume automatic placement; dragging it again pins the
+new position. The coordinate is kept only in the helper's memory: stopping, restarting, or
+reloading the helper clears it. It is never written to the config or state file.
 
 **It only ever opens because you just asked for it.** `asuna chat`, the Chat entry in her
 menu, or — once she has answered something — a poke, for the next 90 seconds, with the

@@ -33,6 +33,7 @@ surface takes the keyboard the moment it maps, so one that appears uninvited
 takes the sentence you were typing somewhere else with it.
 """
 
+import json
 import os
 import queue
 import random
@@ -76,10 +77,14 @@ class Helper:
         self.chat = None
         self.next_glance = None
         self.prompt = None   # the prompt process, while one is open
+        # Absolute logical coordinates within the prompt's output. This belongs
+        # to the helper rather than state.json: restarting (or reloading) the
+        # helper deliberately restores the daemon-chosen placement.
+        self.prompt_position = None
 
     # -- typing at her ------------------------------------------------------
 
-    def prompt_argv(self, where, placeholder="说点什么…"):
+    def prompt_argv(self, where, placeholder="Type a message…", position_fd=None):
         """What to run to ask for a line, and where to put it."""
         configured = (self.config.get("prompt_command") or "").strip()
         if configured:
@@ -99,6 +104,12 @@ class Helper:
         if not os.path.exists(bundled):
             raise IOError("asuna-prompt.py is missing - set `prompt_command` under [ext]")
         argv = [sys.executable, bundled, "--placeholder", placeholder]
+        position = getattr(self, "prompt_position", None)
+        if position is not None:
+            argv += ["--position-left", str(position[0]),
+                     "--position-bottom", str(position[1])]
+        if position_fd is not None:
+            argv += ["--position-fd", str(position_fd)]
         # Beside her, rather than in the middle of the screen. She may have been
         # dragged since the last question, so this is asked each time.
         if where.get("anchor_x"):
@@ -116,7 +127,7 @@ class Helper:
                      "--screen-height", str(int(where.get("screen_height", 0)))]
         return argv
 
-    def ask_the_user(self, timeout=PROMPT_TIMEOUT, placeholder="说点什么…"):
+    def ask_the_user(self, timeout=PROMPT_TIMEOUT, placeholder="Type a message…"):
         """A one-line text entry. None if it was dismissed or timed out.
 
         Kept on `self` rather than local, because a prompt is the one thing here
@@ -133,9 +144,25 @@ class Helper:
             where = self.control.call("ext", status=True)
         except (IOError, OSError):
             where = {}
-        self.prompt = subprocess.Popen(
-            self.prompt_argv(where, placeholder), stdout=subprocess.PIPE, text=True
-        )
+        configured = bool((self.config.get("prompt_command") or "").strip())
+        position_read = position_write = None
+        popen_args = {}
+        if not configured:
+            position_read, position_write = os.pipe()
+            popen_args["pass_fds"] = (position_write,)
+        try:
+            self.prompt = subprocess.Popen(
+                self.prompt_argv(where, placeholder, position_write),
+                stdout=subprocess.PIPE, text=True, **popen_args
+            )
+        except Exception:
+            if position_read is not None:
+                os.close(position_read)
+            if position_write is not None:
+                os.close(position_write)
+            raise
+        if position_write is not None:
+            os.close(position_write)
         try:
             out, _ = self.prompt.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -145,11 +172,32 @@ class Helper:
             return None
         finally:
             code, self.prompt = self.prompt.returncode, None
+            if position_read is not None:
+                with os.fdopen(position_read) as positions:
+                    self.remember_prompt_position(positions.read())
         return (out.strip() or None) if code == 0 else None
+
+    def remember_prompt_position(self, reports):
+        """Apply position-state changes reported by the bundled prompt."""
+        for line in reports.splitlines():
+            try:
+                report = json.loads(line)
+                if not isinstance(report, dict):
+                    continue
+                if report.get("event") == "reset":
+                    self.prompt_position = None
+                    continue
+                position = report
+                left, bottom = int(position["left"]), int(position["bottom"])
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+            self.prompt_position = (left, bottom)
 
     # -- her end ------------------------------------------------------------
 
     def load_config(self):
+        # A reload starts a fresh placement lifecycle just like a helper restart.
+        self.prompt_position = None
         self.config = self.control.call("ext", config=True, secrets=True)
         if self.chat is None:
             self.chat = Chat(self.config)
@@ -281,7 +329,7 @@ class Helper:
             if not text:
                 try:
                     text = self.ask_the_user(
-                        placeholder="接着说…" if answered else "说点什么…")
+                        placeholder="Continue…" if answered else "Type a message…")
                 except (IOError, OSError) as e:
                     log("prompt:", e)
                     return
